@@ -188,3 +188,29 @@ if st.button("🕊️ Get Answer"):
             st.success(answer)
     else:
         st.warning("Please enter a question first.")
+
+# Footer - Made by Anish
+st.markdown(
+    """
+    <style>
+    .footer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        padding: 1rem 0;
+        background: transparent;
+        text-align: center;
+        font-size: 1rem;
+        color: #cfc1f7;
+        font-family: 'Poppins', sans-serif;
+        text-shadow: 0 0 5px rgba(160, 130, 255, 0.6);
+        z-index: 100;
+    }
+    </style>
+    <div class="footer">
+        🌸 Made with devotion by <strong>Anish</strong> 🙏
+    </div>
+    """,
+    unsafe_allow_html=True
+)
