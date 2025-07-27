@@ -9,6 +9,7 @@ from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from fpdf import FPDF
 import time # For streaming effect
+import asyncio # Import asyncio for event loop management
 
 # ------------------- Load API Key -------------------
 load_dotenv()
@@ -268,6 +269,12 @@ llm = ChatGoogleGenerativeAI(
 # ------------------- Load and Embed PDF -------------------
 @st.cache_resource
 def create_vectorstore(pdf_path):
+    # Ensure an asyncio event loop is available for GoogleGenerativeAIEmbeddings
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     if not os.path.exists(pdf_path):
         st.error(f"Error: PDF file not found at {pdf_path}. Please ensure '{pdf_path}' is in the same directory as your app.")
         return None # Indicate failure
@@ -301,7 +308,7 @@ def create_vectorstore(pdf_path):
 # Load background image once and pass its base64 to CSS
 background_b64 = ""
 try:
-    with open("krishna_ji.jpeg", "rb") as img: # Changed to .jpg
+    with open("krishna_ji.jpg", "rb") as img: # Ensure this is the correct filename
         background_b64 = base64.b64encode(img.read()).decode()
     set_custom_css(background_b64) # Pass the base64 string here
 except FileNotFoundError:
@@ -463,7 +470,7 @@ else:
                 )
             else:
                 st.warning("There is no divine conversation to preserve yet.")
-        st.markdown("</div>", unsafe_allow_html=True) # Close the sidebar options container
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
     # ------------------- Footer -------------------
