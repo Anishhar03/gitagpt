@@ -1,0 +1,8 @@
+streamlit>=1.36.0
+python-dotenv>=1.0.0
+langchain>=0.2.11
+langchain-community>=0.2.11
+langchain-google-genai>=1.1.0
+langchain-chroma>=0.2.2
+pypdf>=4.2.0
+fpdf2>=2.7.9
