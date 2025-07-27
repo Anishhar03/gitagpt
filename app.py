@@ -1,3 +1,11 @@
+# --- IMPORTANT: SQLite3 Fix for Chroma on Streamlit Cloud ---
+# These lines must be at the very top of your script, before any other imports
+# that might implicitly try to import sqlite3 (like langchain_chroma)
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# --- END SQLite3 Fix ---
+
 import streamlit as st
 import os
 import base64
@@ -7,13 +15,17 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from fpdf import FPDF
+from fpdf import FPDF # Corrected import for fpdf2
 import time # For streaming effect
 import asyncio # Import asyncio for event loop management
 
 # ------------------- Load API Key -------------------
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+if not GOOGLE_API_KEY:
+    st.error("🚨 Google API Key not found! Please set the GOOGLE_API_KEY environment variable in your `.env` file.")
+    st.stop() # Stop the app if API key is missing
 
 # ------------------- Configure Streamlit Page -------------------
 st.set_page_config(
@@ -28,7 +40,7 @@ def set_custom_css(background_b64):
     st.markdown(
         f"""
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Open+Sans:wght@400;600&family=Playfair+Display:wght=700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Open+Sans:wght@400;600&family=Playfair+Display:wght@700&display=swap');
 
         /* Overall Page Styling */
         .stApp {{
@@ -276,8 +288,9 @@ def create_vectorstore(pdf_path):
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     if not os.path.exists(pdf_path):
-        st.error(f"Error: PDF file not found at {pdf_path}. Please ensure '{pdf_path}' is in the same directory as your app.")
+        st.error(f"Error: PDF file not found at '{pdf_path}'. Please ensure '{pdf_path}' is in the same directory as your app.")
         return None # Indicate failure
+    
     try:
         loader = PyPDFLoader(pdf_path)
         pages = loader.load()
@@ -285,7 +298,8 @@ def create_vectorstore(pdf_path):
         docs = splitter.split_documents(pages)
 
         if not docs:
-            raise ValueError("Text splitting failed. No chunks were created from the PDF.")
+            st.error("Text splitting failed. No chunks were created from the PDF. The PDF might be empty or unreadable.")
+            return None
 
         embeddings = GoogleGenerativeAIEmbeddings(
             model="models/embedding-001",
@@ -295,14 +309,24 @@ def create_vectorstore(pdf_path):
         # Persist directory for faster loading on subsequent runs
         persist_directory = "./gita_chroma"
         if os.path.exists(persist_directory) and os.listdir(persist_directory):
+            st.info("Loading existing spiritual wisdom repository (vector store)...")
             vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
         else:
+            st.info("Creating spiritual wisdom repository (vector store) from Gita...")
             vectorstore = Chroma.from_documents(
                 docs, embedding=embeddings, persist_directory=persist_directory
             )
+            st.success("Spiritual wisdom repository created successfully!")
         return vectorstore
     except Exception as e:
-        st.error(f"Failed to load or process PDF for embeddings: {e}")
+        # Catch specific sqlite3 error for a more user-friendly message
+        if "sqlite3" in str(e).lower() and "unsupported version" in str(e).lower():
+            st.error("🚨 Critical Error: Your system has an unsupported version of sqlite3 for ChromaDB. "
+                     "This issue is typically resolved by ensuring 'pysqlite3-binary' is in your requirements.txt "
+                     "and the module swap code is at the very top of your app.py. "
+                     "If you are deploying on Streamlit Cloud, these steps are crucial.")
+        else:
+            st.error(f"Failed to load or process PDF for embeddings: {e}")
         return None # Indicate failure
 
 # Load background image once and pass its base64 to CSS
@@ -312,7 +336,7 @@ try:
         background_b64 = base64.b64encode(img.read()).decode()
     set_custom_css(background_b64) # Pass the base64 string here
 except FileNotFoundError:
-    st.error("Background image 'krishna_ji.jpg' not found. Please ensure it's in the same directory.")
+    st.error("Background image 'krishna_ji.jpeg' not found. Please ensure it's in the same directory.")
     st.stop()
 except Exception as e:
     st.error(f"Error loading background image: {e}")
