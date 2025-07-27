@@ -308,7 +308,7 @@ def create_vectorstore(pdf_path):
 # Load background image once and pass its base64 to CSS
 background_b64 = ""
 try:
-    with open("krishna_ji.jpg", "rb") as img: # Ensure this is the correct filename
+    with open("krishna_ji.jpeg", "rb") as img: # Ensure this is the correct filename
         background_b64 = base64.b64encode(img.read()).decode()
     set_custom_css(background_b64) # Pass the base64 string here
 except FileNotFoundError:
