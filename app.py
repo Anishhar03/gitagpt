@@ -1,9 +1,13 @@
-# --- IMPORTANT: SQLite3 Fix for Chroma on Streamlit Cloud ---
-# These lines must be at the very top of your script, before any other imports
-# that might implicitly try to import sqlite3 (like langchain_chroma)
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# --- OPTIONAL: SQLite3 Fix for Chroma on some environments ---
+# We *attempt* to swap in pysqlite3 if it's available, but we don't require it.
+try:
+    __import__("pysqlite3")
+    import sys
+
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except Exception:
+    # Fall back to default sqlite3; if it's too old, we handle that gracefully later.
+    pass
 # --- END SQLite3 Fix ---
 
 import streamlit as st
