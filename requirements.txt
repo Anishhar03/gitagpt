@@ -4,6 +4,7 @@ langchain>=0.2.11
 langchain-community>=0.2.11
 langchain-google-genai>=1.1.0
 langchain-chroma>=0.2.2
+langchain-text-splitters>=0.0.2
 pypdf>=4.2.0
 fpdf2>=2.7.9
 pysqlite3-binary
