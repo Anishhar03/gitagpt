@@ -9,6 +9,9 @@ sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import streamlit as st
 import os
 import base64
+import json
+import hashlib
+from pathlib import Path
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -274,6 +277,63 @@ def set_custom_css(background_b64):
         unsafe_allow_html=True
     )
 
+
+# ------------------- Simple File-Based Authentication -------------------
+USERS_FILE = Path("users.json")
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _load_users() -> dict:
+    if not USERS_FILE.exists():
+        return {}
+    try:
+        with USERS_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_users(users: dict) -> None:
+    try:
+        with USERS_FILE.open("w", encoding="utf-8") as f:
+            json.dump(users, f, indent=2)
+    except Exception:
+        st.error("Unable to save user data. Please check file permissions.")
+
+
+def register_user(username: str, password: str, display_name: str, age: int) -> bool:
+    users = _load_users()
+    username = username.strip().lower()
+    if not username or not password:
+        st.warning("Username and password cannot be empty.")
+        return False
+    if username in users:
+        st.warning("This username is already taken. Please choose another.")
+        return False
+
+    users[username] = {
+        "password_hash": _hash_password(password),
+        "display_name": display_name.strip() or username,
+        "age": age,
+    }
+    _save_users(users)
+    return True
+
+
+def authenticate_user(username: str, password: str):
+    users = _load_users()
+    username = username.strip().lower()
+    user = users.get(username)
+    if not user:
+        return None
+    if user.get("password_hash") != _hash_password(password):
+        return None
+    return {"username": username, "display_name": user.get("display_name", username), "age": user.get("age")}
+
 # ------------------- Load LLM -------------------
 llm = ChatGoogleGenerativeAI(
     model="models/gemini-1.5-flash",
@@ -358,10 +418,65 @@ except Exception as e:
     st.warning(f"An error occurred during vector store initialization: {e}. I will answer as Kanha based on my general knowledge.")
 
 
+# ------------------- Authentication Gate -------------------
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None
+
+if not st.session_state.auth_user:
+    st.markdown("<div class='intro-container'>", unsafe_allow_html=True)
+    st.subheader("🙏 Welcome, Seeker! Please sign in to continue.")
+    st.markdown("---")
+
+    auth_mode = st.radio(
+        "Choose your path:",
+        options=["Login", "Register"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    if auth_mode == "Login":
+        with st.form("login_form"):
+            username = st.text_input("Username", max_chars=50)
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("🔐 Enter the Realm")
+            if submitted:
+                user = authenticate_user(username, password)
+                if user:
+                    st.session_state.auth_user = user
+                    # Also sync legacy name/age for rest of UI
+                    st.session_state.name = user["display_name"]
+                    st.session_state.age = user.get("age", "")
+                    st.success(f"Welcome back, {user['display_name']}!")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password. Please try again.")
+    else:
+        with st.form("register_form"):
+            username = st.text_input("Choose a username", max_chars=50)
+            password = st.text_input("Choose a password", type="password")
+            confirm_password = st.text_input("Confirm password", type="password")
+            display_name = st.text_input("Your sacred name (optional)", max_chars=50)
+            age_str = st.text_input("How many springs have you witnessed?", max_chars=3, placeholder="Your Age in Years...")
+            submitted = st.form_submit_button("🌟 Create Devotee Account")
+            if submitted:
+                if password != confirm_password:
+                    st.warning("Passwords do not match.")
+                elif not age_str.strip().isdigit():
+                    st.warning("Please provide a valid numeric age.")
+                else:
+                    age_val = int(age_str.strip())
+                    if register_user(username, password, display_name or username, age_val):
+                        st.success("Account created successfully! Please log in with your new credentials.")
+                    else:
+                        st.info("Unable to create account. Please adjust your details and try again.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
 # ------------------- Intro Screen (Modal-like) -------------------
-if "name" not in st.session_state or not st.session_state.name:
-    st.session_state.name = ""
-    st.session_state.age = ""
+elif "name" not in st.session_state or not st.session_state.name:
+    # Use authenticated profile to pre-fill name and age
+    st.session_state.name = st.session_state.auth_user.get("display_name") if st.session_state.auth_user else ""
+    st.session_state.age = st.session_state.auth_user.get("age") if st.session_state.auth_user else ""
 
     # This div contains the intro form and applies the new styling
     st.markdown("<div class='intro-container'>", unsafe_allow_html=True)
@@ -369,8 +484,8 @@ if "name" not in st.session_state or not st.session_state.name:
     st.markdown("---") # Visual separator
     
     with st.form("intro_form", clear_on_submit=True):
-        name = st.text_input("What is your sacred name?", max_chars=50, placeholder="Your Devotional Name...")
-        age = st.text_input("How many springs have you witnessed?", max_chars=3, placeholder="Your Age in Years...")
+        name = st.text_input("What is your sacred name?", max_chars=50, value=str(st.session_state.name or ""), placeholder="Your Devotional Name...")
+        age = st.text_input("How many springs have you witnessed?", max_chars=3, value=str(st.session_state.age or ""), placeholder="Your Age in Years...")
         
         # Use a more thematic button text
         submitted = st.form_submit_button("🕊️ Enter the Realm of Gita's Wisdom")
@@ -379,6 +494,17 @@ if "name" not in st.session_state or not st.session_state.name:
             if name.strip() and age.strip().isdigit():
                 st.session_state.name = name.strip()
                 st.session_state.age = int(age.strip())
+                # Update profile with refined name/age
+                if st.session_state.auth_user:
+                    users = _load_users()
+                    profile = users.get(st.session_state.auth_user["username"], {})
+                    profile["display_name"] = st.session_state.name
+                    profile["age"] = st.session_state.age
+                    profile["password_hash"] = profile.get("password_hash", "")
+                    users[st.session_state.auth_user["username"]] = profile
+                    _save_users(users)
+                    st.session_state.auth_user["display_name"] = st.session_state.name
+                    st.session_state.auth_user["age"] = st.session_state.age
                 st.rerun() # Rerun to switch to chat interface
             else:
                 st.warning("Please gracefully provide a valid name and numeric age to proceed on this path.")
@@ -449,6 +575,17 @@ else:
     # ------------------- Sidebar (Applying glass-effect) -------------------
     with st.sidebar:
         st.header("🗂️ Sacred Options")
+        if st.session_state.auth_user:
+            st.markdown(
+                f"**Signed in as:** `{st.session_state.auth_user['username']}`  \n"
+                f"**Devotional name:** {st.session_state.auth_user.get('display_name', '')}"
+            )
+            if st.button("🚪 Log Out"):
+                for key in ["auth_user", "name", "age", "messages", "chat_history"]:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.success("You have gracefully signed out. May we meet again on this sacred path.")
+                st.rerun()
         st.markdown("<div class='sidebar-options-container'>", unsafe_allow_html=True) # New wrapper for sidebar options
         if st.button("🔄 Clear Our Dialogue"):
             st.session_state.messages = []
