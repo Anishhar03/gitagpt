@@ -16,7 +16,10 @@ from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.chains import RetrievalQA
+try:
+    from langchain.chains import RetrievalQA
+except Exception:
+    from langchain.chains.retrieval_qa.base import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from fpdf import FPDF
 # Import XPos and YPos for fpdf2 deprecation fixes
