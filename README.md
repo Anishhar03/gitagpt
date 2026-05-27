@@ -1,21 +1,20 @@
 # Gita GPT
 
-Gita GPT is an end-to-end Streamlit application that answers reflective questions with Retrieval-Augmented Generation over the Bhagavad Gita. It retrieves relevant passages from `gita_book.pdf`, sends the grounded context to Gemini, and returns a calm, practical response with source passages and a downloadable chat transcript.
+Gita GPT is an end-to-end Streamlit application that answers reflective questions with Retrieval-Augmented Generation over the Bhagavad Gita. It retrieves relevant passages from `gita_book.pdf`, answers locally by default, can use Gemini when a valid key is enabled, and returns source passages plus a downloadable chat transcript.
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B?logo=streamlit&logoColor=white)
 ![LangChain](https://img.shields.io/badge/LangChain-RAG-1C3C3C)
-![Chroma](https://img.shields.io/badge/Chroma-Vector%20Store-5B21B6)
+![Local RAG](https://img.shields.io/badge/Local-RAG-0F766E)
 ![Gemini](https://img.shields.io/badge/Gemini-Google%20AI-4285F4?logo=google&logoColor=white)
 
 ## What It Does
 
 - Collects seeker context: name, age, and intention.
 - Loads the Bhagavad Gita PDF and chunks it into searchable passages.
-- Embeds passages with Google Generative AI embeddings.
-- Stores and reuses the local Chroma vector index in `gita_chroma/`.
+- Builds a local TF-IDF retrieval index from the PDF.
 - Retrieves the most relevant passages for each question.
-- Sends retrieved context to Gemini for a grounded answer.
+- Answers locally by default, or sends retrieved context to Gemini when `GITA_GPT_ENGINE=auto` or `gemini`.
 - Shows source passages used for the response.
 - Exports the conversation as a PDF transcript.
 - Runs locally, in Docker, on Streamlit Community Cloud, or on a container host.
@@ -26,13 +25,15 @@ Gita GPT is an end-to-end Streamlit application that answers reflective question
 flowchart LR
     A["gita_book.pdf"] --> B["PyPDFLoader"]
     B --> C["Recursive text splitter"]
-    C --> D["Google embeddings"]
-    D --> E["Chroma vector store"]
+    C --> D["Local TF-IDF index"]
     F["User question"] --> G["Similarity search"]
-    E --> G
+    D --> G
     G --> H["Prompt with retrieved passages"]
-    H --> I["Gemini chat model"]
-    I --> J["Grounded answer + sources"]
+    H --> I{"Engine"}
+    I --> M["Local answer builder"]
+    I --> N["Gemini chat model"]
+    M --> J["Grounded answer + sources"]
+    N --> J
     J --> K["Streamlit UI"]
     J --> L["PDF transcript"]
 ```
@@ -77,9 +78,16 @@ Copy the example file:
 cp .env.example .env
 ```
 
-Set your Google API key:
+The app works locally without a Google key:
 
 ```bash
+GITA_GPT_ENGINE=local
+```
+
+To enable Gemini with a valid key:
+
+```bash
+GITA_GPT_ENGINE=auto
 GOOGLE_API_KEY=your_google_gemini_api_key_here
 ```
 
@@ -101,12 +109,12 @@ http://localhost:8501
 
 | Variable | Required | Default | Meaning |
 |---|---:|---|---|
-| `GOOGLE_API_KEY` | Yes | none | Google Generative Language API key used by Gemini and embeddings. |
+| `GITA_GPT_ENGINE` | No | `local` | `local` works offline, `auto` tries Gemini then falls back, `gemini` requires Google. |
+| `GOOGLE_API_KEY` | Only for Gemini | none | Google Generative Language API key used by Gemini answer synthesis. |
 | `GITA_GPT_MODEL` | No | `gemini-1.5-flash` | Chat model used for answer generation. |
-| `GITA_GPT_EMBEDDING_MODEL` | No | `models/embedding-001` | Embedding model used for vector retrieval. |
 | `GITA_GPT_CHUNK_SIZE` | No | `1000` | Character target for each PDF chunk. |
 | `GITA_GPT_CHUNK_OVERLAP` | No | `150` | Character overlap between chunks to preserve context. |
-| `GITA_GPT_TOP_K` | No | `4` | Number of retrieved passages sent to Gemini. |
+| `GITA_GPT_TOP_K` | No | `4` | Number of retrieved passages used for each answer. |
 
 ## Deployment
 
@@ -116,14 +124,14 @@ http://localhost:8501
 2. Open Streamlit Community Cloud.
 3. Create a new app from the GitHub repo.
 4. Main file: `app.py`.
-5. Add `GOOGLE_API_KEY` in Streamlit Secrets.
+5. Optional: add `GITA_GPT_ENGINE="auto"` and `GOOGLE_API_KEY` in Streamlit Secrets for Gemini.
 6. Deploy.
 
 ### Docker
 
 ```bash
 docker build -t gita-gpt .
-docker run --rm -p 8501:8501 -e GOOGLE_API_KEY=your_key_here gita-gpt
+docker run --rm -p 8501:8501 gita-gpt
 ```
 
 Then open:
@@ -157,6 +165,7 @@ Full deployment notes are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 |   |-- DEPLOYMENT.md
 |   `-- WORKFLOWS.md
 `-- scripts/
+    |-- smoke_local_answer.py
     `-- verify_project.py
 ```
 
@@ -166,6 +175,7 @@ Run the lightweight repository check:
 
 ```bash
 python scripts/verify_project.py
+python scripts/smoke_local_answer.py
 ```
 
 Run the app:
@@ -180,14 +190,14 @@ Expected behavior:
 2. You enter name, age, and intention.
 3. The chat opens and prepares the Gita knowledge base.
 4. A question retrieves Gita passages.
-5. Gemini returns a grounded answer.
+5. The local answer builder returns a grounded answer. If Gemini is enabled and healthy, Gemini returns the answer.
 6. Retrieved sources are visible.
 7. Transcript PDF download works after messages exist.
 
 ## Security Notes
 
 - Do not commit `.env` or real API keys.
-- The vector cache `gita_chroma/` is generated runtime data and is ignored by Git.
+- The app can run without external AI services in `local` mode.
 - If a Google key is exposed publicly, revoke it or restrict it immediately in Google Cloud Console.
 - For public deployments, restrict the API key to the Generative Language API and trusted referrers or infrastructure where possible.
 
@@ -195,14 +205,12 @@ Expected behavior:
 
 | Problem | Fix |
 |---|---|
-| `GOOGLE_API_KEY` missing | Set it in `.env`, shell env, or Streamlit Secrets. |
-| Chroma sqlite error | On Linux, `pysqlite3-binary` is installed and shimmed automatically. |
-| Chroma cache error | The generated `gita_chroma/` cache is rebuilt automatically when it is incompatible. |
+| `GOOGLE_API_KEY` missing | Use `GITA_GPT_ENGINE=local`, or set a valid key and use `auto` or `gemini`. |
 | Google connection error | Check API key restrictions, quota, Generative Language API access, and outbound network access. |
 | PDF not found | Keep `gita_book.pdf` in the project root. |
 | Background missing | Keep `krishna_ji.jpeg` in the project root. |
 | Gemini quota error | Check Google API key, billing/quota, and Generative Language API access. |
-| Slow first answer | The first run may create the vector store; later runs reuse `gita_chroma/`. |
+| Slow first answer | The first run reads and chunks the PDF; later reruns use Streamlit's cache. |
 
 ## License
 

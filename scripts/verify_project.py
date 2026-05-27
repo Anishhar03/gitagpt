@@ -21,6 +21,7 @@ REQUIRED_FILES = [
     "docs/DEPLOYMENT.md",
     "docs/WORKFLOWS.md",
     "CHANGES.md",
+    "scripts/smoke_local_answer.py",
 ]
 
 TEXT_FILE_SUFFIXES = {

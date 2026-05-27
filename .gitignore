@@ -13,6 +13,7 @@ __pycache__/
 .mypy_cache/
 .codex_deps/
 codex_deps/
+tmp/
 .venv/
 .venv*/
 venv/

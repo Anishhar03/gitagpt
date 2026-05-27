@@ -1,41 +1,82 @@
-# Optional sqlite compatibility shim for hosted Linux environments where
-# ChromaDB needs a newer sqlite build than the system Python provides.
-try:
-    __import__("pysqlite3")
-    import sys
-
-    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-except Exception:
-    pass
-
 import base64
+import math
 import os
 import re
-import shutil
 import textwrap
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
 import streamlit as st
-from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 APP_DIR = Path(__file__).resolve().parent
 PDF_PATH = APP_DIR / "gita_book.pdf"
 BACKGROUND_PATH = APP_DIR / "krishna_ji.jpeg"
-VECTOR_DIR = APP_DIR / "gita_chroma"
-COLLECTION_NAME = "gita_gpt"
 
 DEFAULT_MODEL = "gemini-1.5-flash"
-DEFAULT_EMBEDDING_MODEL = "models/embedding-001"
+DEFAULT_ENGINE = "local"
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 150
 DEFAULT_TOP_K = 4
+STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "also",
+    "and",
+    "any",
+    "are",
+    "because",
+    "been",
+    "being",
+    "but",
+    "can",
+    "could",
+    "did",
+    "does",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "how",
+    "into",
+    "its",
+    "may",
+    "not",
+    "one",
+    "our",
+    "out",
+    "should",
+    "that",
+    "the",
+    "their",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "why",
+    "will",
+    "with",
+    "you",
+    "your",
+}
 
 
 def load_local_env(path: Path) -> None:
@@ -76,10 +117,20 @@ def get_int_setting(name: str, default: int) -> int:
 
 GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY")
 CHAT_MODEL = get_secret("GITA_GPT_MODEL", DEFAULT_MODEL)
-EMBEDDING_MODEL = get_secret("GITA_GPT_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+ENGINE = get_secret("GITA_GPT_ENGINE", DEFAULT_ENGINE).lower()
 CHUNK_SIZE = get_int_setting("GITA_GPT_CHUNK_SIZE", DEFAULT_CHUNK_SIZE)
 CHUNK_OVERLAP = get_int_setting("GITA_GPT_CHUNK_OVERLAP", DEFAULT_CHUNK_OVERLAP)
 TOP_K = get_int_setting("GITA_GPT_TOP_K", DEFAULT_TOP_K)
+
+
+@dataclass
+class RuntimeResources:
+    """The active answering backend for the current session."""
+
+    mode: str
+    llm: ChatGoogleGenerativeAI | None = None
+    local_index: dict | None = None
+    notice: str = ""
 
 
 st.set_page_config(
@@ -180,14 +231,6 @@ def apply_theme() -> None:
             font-size: 0.92rem;
         }}
 
-        .section-panel {{
-            border: 1px solid rgba(226, 232, 240, 0.18);
-            background: rgba(15, 23, 42, 0.78);
-            border-radius: 10px;
-            padding: 1.2rem;
-            margin: 1rem 0;
-        }}
-
         .source-box {{
             border-left: 3px solid #38bdf8;
             background: rgba(8, 47, 73, 0.55);
@@ -241,14 +284,14 @@ def render_hero() -> None:
             <h1>Gita GPT</h1>
             <p>
                 Ask reflective questions and receive guidance grounded in retrieved
-                passages from the Bhagavad Gita. The app combines Gemini, local
-                Chroma retrieval, and a calm Streamlit interface for an end-to-end
+                passages from the Bhagavad Gita. The app combines local retrieval,
+                optional Gemini synthesis, and a calm Streamlit interface for an end-to-end
                 spiritual Q&A experience.
             </p>
         </div>
         <div class="metric-grid">
             <div class="metric"><strong>RAG</strong><span>Answers are grounded in the PDF corpus.</span></div>
-            <div class="metric"><strong>Gemini</strong><span>Google Generative AI powers response synthesis.</span></div>
+            <div class="metric"><strong>Gemini</strong><span>Use Google AI when a valid key is configured.</span></div>
             <div class="metric"><strong>PDF</strong><span>Download your conversation as a transcript.</span></div>
         </div>
         """,
@@ -259,7 +302,7 @@ def render_hero() -> None:
 def require_configuration() -> None:
     """Stop early with useful setup instructions if required assets are missing."""
     missing_items = []
-    if not GOOGLE_API_KEY:
+    if ENGINE == "gemini" and not GOOGLE_API_KEY:
         missing_items.append("GOOGLE_API_KEY")
     if not PDF_PATH.exists():
         missing_items.append("gita_book.pdf")
@@ -270,6 +313,7 @@ def require_configuration() -> None:
     st.error("Gita GPT needs a little setup before it can run.")
     st.write("Missing: " + ", ".join(missing_items))
     st.code(
+        "GITA_GPT_ENGINE=auto\n"
         "GOOGLE_API_KEY=your_google_gemini_api_key_here\n"
         "streamlit run app.py",
         language="bash",
@@ -287,13 +331,9 @@ def load_llm(api_key: str, model_name: str) -> ChatGoogleGenerativeAI:
     )
 
 
-def build_vectorstore(
-    embedding_model: str,
-    embeddings,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> Chroma:
-    """Create a fresh Chroma vector store from the bundled Gita PDF."""
+@st.cache_resource(show_spinner=False)
+def load_corpus(pdf_mtime: float, chunk_size: int, chunk_overlap: int) -> list:
+    """Load, split, and cache the bundled Gita PDF."""
     loader = PyPDFLoader(str(PDF_PATH))
     pages = loader.load()
     splitter = RecursiveCharacterTextSplitter(
@@ -308,61 +348,42 @@ def build_vectorstore(
     for index, chunk in enumerate(chunks):
         chunk.metadata["chunk_index"] = index
         chunk.metadata["source"] = "Bhagavad Gita"
-        chunk.metadata["embedding_model"] = embedding_model
-
-    return Chroma.from_documents(
-        chunks,
-        embedding=embeddings,
-        persist_directory=str(VECTOR_DIR),
-        collection_name=COLLECTION_NAME,
-    )
+    return chunks
 
 
-def clear_chroma_client_cache() -> None:
-    """Clear Chroma's in-process client cache before rebuilding generated data."""
-    try:
-        from chromadb.api.shared_system_client import SharedSystemClient
-
-        SharedSystemClient.clear_system_cache()
-    except Exception:
-        pass
-
-
-def remove_vector_cache() -> None:
-    """Remove the generated vector cache so it can be rebuilt from the PDF."""
-    clear_chroma_client_cache()
-    shutil.rmtree(VECTOR_DIR, ignore_errors=True)
-    clear_chroma_client_cache()
+def tokenize(text: str) -> list[str]:
+    """Tokenize text for the built-in local retriever."""
+    words = re.findall(r"[A-Za-z][A-Za-z'-]{2,}", text.lower())
+    return [word for word in words if word not in STOPWORDS]
 
 
 @st.cache_resource(show_spinner=False)
-def load_vectorstore(
-    api_key: str,
-    embedding_model: str,
-    pdf_mtime: float,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> Chroma:
-    """Load or build the persistent Chroma vector store from the Gita PDF."""
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=embedding_model,
-        google_api_key=api_key,
-    )
+def load_local_index(pdf_mtime: float, chunk_size: int, chunk_overlap: int) -> dict:
+    """Build a lightweight TF-IDF index that works without external APIs."""
+    docs = load_corpus(pdf_mtime, chunk_size, chunk_overlap)
+    doc_counts = [Counter(tokenize(doc.page_content)) for doc in docs]
+    document_frequency: Counter = Counter()
+    for counts in doc_counts:
+        document_frequency.update(counts.keys())
 
-    if VECTOR_DIR.exists() and any(VECTOR_DIR.iterdir()):
-        try:
-            vectorstore = Chroma(
-                persist_directory=str(VECTOR_DIR),
-                embedding_function=embeddings,
-                collection_name=COLLECTION_NAME,
-            )
-            if vectorstore._collection.count() <= 0:
-                raise RuntimeError("Existing vector cache is empty.")
-            return vectorstore
-        except Exception:
-            remove_vector_cache()
+    total_docs = max(len(docs), 1)
+    idf = {
+        term: math.log((1 + total_docs) / (1 + frequency)) + 1
+        for term, frequency in document_frequency.items()
+    }
 
-    return build_vectorstore(embedding_model, embeddings, chunk_size, chunk_overlap)
+    vectors = []
+    norms = []
+    for counts in doc_counts:
+        vector = {
+            term: (1 + math.log(count)) * idf.get(term, 1.0)
+            for term, count in counts.items()
+        }
+        norm = math.sqrt(sum(weight * weight for weight in vector.values()))
+        vectors.append(vector)
+        norms.append(norm)
+
+    return {"docs": docs, "idf": idf, "vectors": vectors, "norms": norms}
 
 
 def normalize_text(text: str) -> str:
@@ -443,20 +464,153 @@ Seeker's question:
 """.strip()
 
 
+def local_similarity_search(local_index: dict, question: str, top_k: int) -> list:
+    """Return the highest-scoring PDF chunks using the local TF-IDF index."""
+    query_counts = Counter(tokenize(question))
+    if not query_counts:
+        return local_index["docs"][:top_k]
+
+    idf = local_index["idf"]
+    query_vector = {
+        term: (1 + math.log(count)) * idf.get(term, 1.0)
+        for term, count in query_counts.items()
+    }
+    query_norm = math.sqrt(sum(weight * weight for weight in query_vector.values()))
+    if query_norm == 0:
+        return local_index["docs"][:top_k]
+
+    scores = []
+    for index, vector in enumerate(local_index["vectors"]):
+        doc_norm = local_index["norms"][index]
+        if doc_norm == 0:
+            continue
+        dot_product = sum(
+            weight * vector.get(term, 0.0) for term, weight in query_vector.items()
+        )
+        if dot_product > 0:
+            scores.append((dot_product / (query_norm * doc_norm), index))
+
+    if not scores:
+        return local_index["docs"][:top_k]
+
+    scores.sort(reverse=True)
+    return [local_index["docs"][index] for _, index in scores[:top_k]]
+
+
+def extract_relevant_sentences(question: str, docs: Iterable, limit: int = 4) -> list[str]:
+    """Pick short source-grounded sentences for the local answer."""
+    question_terms = set(tokenize(question))
+    ranked_sentences = []
+    seen = set()
+
+    for doc in docs:
+        sentences = re.split(r"(?<=[.!?])\s+", normalize_text(doc.page_content))
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence) < 35:
+                continue
+            sentence_key = sentence.lower()
+            if sentence_key in seen:
+                continue
+            seen.add(sentence_key)
+            sentence_terms = set(tokenize(sentence))
+            score = len(question_terms & sentence_terms)
+            if score > 0:
+                ranked_sentences.append((score, sentence[:280]))
+
+    ranked_sentences.sort(reverse=True)
+    return [sentence for _, sentence in ranked_sentences[:limit]]
+
+
+def build_local_answer(name: str, age: int | None, question: str, docs: list) -> str:
+    """Create a grounded answer when Gemini is unavailable or disabled."""
+    age_text = f", age {age}" if age else ""
+    sentences = extract_relevant_sentences(question, docs)
+    if not sentences:
+        sentences = [
+            normalize_text(doc.page_content)[:260]
+            for doc in docs[:3]
+            if normalize_text(doc.page_content)
+        ]
+
+    source_notes = "\n".join(f"- {sentence}" for sentence in sentences)
+    if not source_notes:
+        source_notes = "- The retrieved passages emphasize steady action, restraint, and reflection."
+
+    return f"""
+1. A direct answer.
+{name}{age_text}, focus on the next right action that is in your control. Let the result matter, but do not let it own your attention. Bring the mind back to the work in front of you whenever it runs toward fear, comparison, or outcome.
+
+2. A Gita-grounded reflection.
+The retrieved passages point toward disciplined action, inner steadiness, and self-mastery:
+{source_notes}
+
+3. A practical action for today.
+Write one duty for the next hour, work on it for 25 minutes without switching tasks, then pause for two minutes and ask: "Did I act with sincerity, regardless of the result?" Repeat that cycle before judging the whole day.
+""".strip()
+
+
+def load_runtime_resources() -> RuntimeResources:
+    """Prepare the active answering backend without requiring network access."""
+    engine = ENGINE if ENGINE in {"auto", "gemini", "local"} else "local"
+    local_index = load_local_index(PDF_PATH.stat().st_mtime, CHUNK_SIZE, CHUNK_OVERLAP)
+
+    if engine == "local":
+        return RuntimeResources(mode="local", local_index=local_index)
+
+    if not GOOGLE_API_KEY:
+        if engine == "gemini":
+            raise RuntimeError("GOOGLE_API_KEY is required when GITA_GPT_ENGINE=gemini.")
+        return RuntimeResources(
+            mode="local",
+            local_index=local_index,
+            notice="Gemini key is not configured, so local mode is answering.",
+        )
+
+    try:
+        return RuntimeResources(
+            mode="gemini",
+            llm=load_llm(GOOGLE_API_KEY, CHAT_MODEL),
+            local_index=local_index,
+        )
+    except Exception as exc:
+        if engine == "gemini":
+            raise
+        return RuntimeResources(
+            mode="local",
+            local_index=local_index,
+            notice=f"Gemini setup failed, so local mode is answering. {friendly_error_message(exc)}",
+        )
+
+
 def answer_question(
-    llm: ChatGoogleGenerativeAI,
-    vectorstore: Chroma,
+    resources: RuntimeResources,
     name: str,
     age: int | None,
     question: str,
     top_k: int,
-) -> tuple[str, list]:
-    """Retrieve relevant passages, ask Gemini, and return answer plus sources."""
-    docs = vectorstore.similarity_search(question, k=top_k)
+) -> tuple[str, list, str]:
+    """Retrieve relevant passages and answer with Gemini or local fallback."""
+    if not resources.local_index:
+        raise RuntimeError("Local retrieval index is not loaded.")
+    docs = local_similarity_search(resources.local_index, question, top_k)
     context = format_sources(docs)
-    prompt = build_prompt(name=name, age=age, question=question, context=context)
-    response = llm.invoke(prompt)
-    return str(response.content), docs
+
+    if resources.llm is None:
+        return build_local_answer(name, age, question, docs), docs, ""
+
+    try:
+        prompt = build_prompt(name=name, age=age, question=question, context=context)
+        response = resources.llm.invoke(prompt)
+        return str(response.content), docs, ""
+    except Exception as exc:
+        if ENGINE == "gemini":
+            raise
+        return (
+            build_local_answer(name, age, question, docs),
+            docs,
+            f"Gemini was unavailable, so local mode answered. {friendly_error_message(exc)}",
+        )
 
 
 def pdf_escape(text: str) -> str:
@@ -539,6 +693,8 @@ def initialize_session() -> None:
         "intention": "",
         "messages": [],
         "last_sources": [],
+        "active_engine": "not started",
+        "engine_notice": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -547,7 +703,6 @@ def initialize_session() -> None:
 
 def render_profile_form() -> None:
     """Collect lightweight seeker context before opening the chat."""
-    st.markdown('<div class="section-panel">', unsafe_allow_html=True)
     st.subheader("Begin your dialogue")
     with st.form("profile_form"):
         name = st.text_input("Name", placeholder="Arjuna")
@@ -567,21 +722,26 @@ def render_profile_form() -> None:
         st.session_state.messages = []
         st.session_state.last_sources = []
         st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_sidebar() -> None:
     """Render operational controls and status in the sidebar."""
     with st.sidebar:
         st.title("Gita GPT")
-        st.caption("Grounded spiritual Q&A powered by Gemini and local retrieval.")
+        st.caption("Grounded spiritual Q&A with local retrieval and optional Gemini.")
 
         st.subheader("Runtime")
+        st.write(f"Configured engine: `{ENGINE}`")
+        st.write(f"Active engine: `{st.session_state.active_engine}`")
         st.write(f"Model: `{CHAT_MODEL}`")
-        st.write(f"Embedding: `{EMBEDDING_MODEL}`")
         st.write(f"Top K: `{TOP_K}`")
-        st.write(f"Vector store: `{VECTOR_DIR.name}`")
         st.write(f"PDF: `{PDF_PATH.name}`")
+        if GOOGLE_API_KEY and ENGINE == "local":
+            st.write("Gemini key: `configured, unused`")
+        elif GOOGLE_API_KEY:
+            st.write("Gemini key: `configured`")
+        else:
+            st.write("Gemini key: `not configured`")
 
         st.subheader("Session")
         if st.session_state.profile_ready:
@@ -590,30 +750,39 @@ def render_sidebar() -> None:
             if st.session_state.intention:
                 st.write(f"Intention: {st.session_state.intention}")
 
-        if st.button("Clear chat"):
-            st.session_state.messages = []
-            st.session_state.last_sources = []
-            st.rerun()
+        if st.session_state.profile_ready:
+            if st.button("Clear chat"):
+                st.session_state.messages = []
+                st.session_state.last_sources = []
+                st.rerun()
 
-        if st.button("Reset profile"):
-            for key in ["profile_ready", "name", "age", "intention", "messages", "last_sources"]:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
+            if st.button("Reset profile"):
+                for key in [
+                    "profile_ready",
+                    "name",
+                    "age",
+                    "intention",
+                    "messages",
+                    "last_sources",
+                    "active_engine",
+                    "engine_notice",
+                ]:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
 
-        if st.session_state.messages:
-            transcript = build_transcript_pdf(st.session_state.name, st.session_state.messages)
-            st.download_button(
-                "Download transcript",
-                data=transcript,
-                file_name=f"gita_gpt_{st.session_state.name.replace(' ', '_')}.pdf",
-                mime="application/pdf",
-            )
+            if st.session_state.messages:
+                transcript = build_transcript_pdf(st.session_state.name, st.session_state.messages)
+                st.download_button(
+                    "Download transcript",
+                    data=transcript,
+                    file_name=f"gita_gpt_{st.session_state.name.replace(' ', '_')}.pdf",
+                    mime="application/pdf",
+                )
 
 
-def render_chat(llm: ChatGoogleGenerativeAI, vectorstore: Chroma) -> None:
+def render_chat(resources: RuntimeResources) -> None:
     """Render chat history, handle user input, and display source passages."""
-    st.markdown('<div class="section-panel">', unsafe_allow_html=True)
     st.subheader(f"Namaste, {st.session_state.name}")
     if st.session_state.intention:
         st.caption(f"Your intention: {st.session_state.intention}")
@@ -635,9 +804,8 @@ def render_chat(llm: ChatGoogleGenerativeAI, vectorstore: Chroma) -> None:
         with st.chat_message("assistant", avatar=":material/self_improvement:"):
             with st.spinner("Retrieving Gita passages and preparing an answer..."):
                 try:
-                    answer, sources = answer_question(
-                        llm=llm,
-                        vectorstore=vectorstore,
+                    answer, sources, runtime_notice = answer_question(
+                        resources=resources,
                         name=st.session_state.name,
                         age=st.session_state.age,
                         question=user_question,
@@ -650,8 +818,11 @@ def render_chat(llm: ChatGoogleGenerativeAI, vectorstore: Chroma) -> None:
                         f"Details: {friendly_error_message(exc)}"
                     )
                     sources = []
+                    runtime_notice = ""
 
             st.write(answer)
+            if runtime_notice:
+                st.caption(runtime_notice)
             st.session_state.messages.append({"role": "assistant", "content": answer})
             st.session_state.last_sources = sources
 
@@ -670,8 +841,6 @@ def render_chat(llm: ChatGoogleGenerativeAI, vectorstore: Chroma) -> None:
                     unsafe_allow_html=True,
                 )
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
 
 def main() -> None:
     """Streamlit entrypoint."""
@@ -679,23 +848,21 @@ def main() -> None:
     render_hero()
     require_configuration()
     initialize_session()
-    render_sidebar()
 
     if not st.session_state.profile_ready:
+        st.session_state.active_engine = "not started"
+        st.session_state.engine_notice = ""
+        render_sidebar()
         render_profile_form()
         return
 
     try:
         with st.spinner("Preparing the Gita knowledge base..."):
-            llm = load_llm(GOOGLE_API_KEY, CHAT_MODEL)
-            vectorstore = load_vectorstore(
-                GOOGLE_API_KEY,
-                EMBEDDING_MODEL,
-                PDF_PATH.stat().st_mtime,
-                CHUNK_SIZE,
-                CHUNK_OVERLAP,
-            )
+            resources = load_runtime_resources()
+            st.session_state.active_engine = resources.mode
+            st.session_state.engine_notice = resources.notice
     except Exception as exc:
+        render_sidebar()
         st.error("Gita GPT could not prepare the knowledge base.")
         st.write(
             "Check the Google API key, Generative Language API access, quota, "
@@ -704,7 +871,10 @@ def main() -> None:
         st.code(friendly_error_message(exc), language="text")
         st.stop()
 
-    render_chat(llm, vectorstore)
+    render_sidebar()
+    if st.session_state.engine_notice:
+        st.info(st.session_state.engine_notice)
+    render_chat(resources)
 
 
 if __name__ == "__main__":

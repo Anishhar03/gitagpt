@@ -2,56 +2,37 @@
 
 This file explains the major sections of `app.py` and why they exist. It is written for a developer who wants to modify the project confidently.
 
-## 1. sqlite Compatibility Shim
-
-```python
-try:
-    __import__("pysqlite3")
-    import sys
-    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-except Exception:
-    pass
-```
-
-Meaning:
-
-- ChromaDB needs a modern sqlite build.
-- Some hosted Linux images ship an older sqlite.
-- `pysqlite3-binary` provides a newer sqlite implementation.
-- The module swap makes libraries that import `sqlite3` use `pysqlite3` instead.
-- The `try/except` keeps local environments working even if `pysqlite3` is unavailable.
-
-## 2. Constants
+## 1. Constants
 
 ```python
 APP_DIR = Path(__file__).resolve().parent
 PDF_PATH = APP_DIR / "gita_book.pdf"
 BACKGROUND_PATH = APP_DIR / "krishna_ji.jpeg"
-VECTOR_DIR = APP_DIR / "gita_chroma"
 ```
 
 Meaning:
 
-- All important files are resolved relative to `app.py`.
-- This avoids path bugs when Streamlit is launched from a different directory.
-- `gita_chroma/` is the runtime vector database cache.
+- Important files are resolved relative to `app.py`.
+- This avoids path bugs when Streamlit is launched from another directory.
+- The PDF is the knowledge source and the image powers the visual background.
 
-## 3. Configuration Loading
+## 2. Configuration Loading
 
 ```python
 load_local_env(APP_DIR / ".env")
 GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY")
-CHAT_MODEL = get_secret("GITA_GPT_MODEL", DEFAULT_MODEL)
+ENGINE = get_secret("GITA_GPT_ENGINE", DEFAULT_ENGINE).lower()
 ```
 
 Meaning:
 
-- `load_local_env()` loads simple local `.env` values without an extra dependency.
+- `load_local_env()` loads simple local `.env` values without another package.
 - `get_secret()` checks Streamlit Secrets first, then environment variables.
-- This supports local development and hosted deployment without changing code.
-- Real keys stay outside Git.
+- `GITA_GPT_ENGINE=local` works without a Google key.
+- `GITA_GPT_ENGINE=auto` tries Gemini when a key is present and falls back locally.
+- `GITA_GPT_ENGINE=gemini` requires a valid Google key.
 
-## 4. Streamlit Page Setup
+## 3. Streamlit Page Setup
 
 ```python
 st.set_page_config(...)
@@ -59,11 +40,11 @@ st.set_page_config(...)
 
 Meaning:
 
-- Sets browser tab title.
-- Uses wide layout for a modern landing page and chat surface.
-- Opens the sidebar so runtime settings and controls are immediately visible.
+- Sets the browser tab title.
+- Uses a wide layout for the landing page and chat surface.
+- Opens the sidebar so runtime status and controls are visible.
 
-## 5. Theme and Hero UI
+## 4. Theme and Hero UI
 
 ```python
 apply_theme()
@@ -72,11 +53,11 @@ render_hero()
 
 Meaning:
 
-- `apply_theme()` injects CSS for the background, panels, cards, buttons, and responsive layout.
+- `apply_theme()` injects CSS for the background, panels, buttons, and responsive layout.
 - `image_to_base64()` embeds `krishna_ji.jpeg` as a CSS background.
-- `render_hero()` shows the first-viewport brand signal and explains the app in one glance.
+- `render_hero()` shows the app identity and value immediately.
 
-## 6. Configuration Gate
+## 5. Configuration Gate
 
 ```python
 require_configuration()
@@ -84,68 +65,65 @@ require_configuration()
 
 Meaning:
 
-- The app stops early if required config is missing.
-- It checks for `GOOGLE_API_KEY` and `gita_book.pdf`.
-- This gives a clear setup message instead of failing deep inside LangChain.
+- The app stops early if `gita_book.pdf` is missing.
+- It only requires `GOOGLE_API_KEY` when `GITA_GPT_ENGINE=gemini`.
+- This keeps the default local mode runnable without external services.
 
-## 7. Cached LLM Loader
-
-```python
-@st.cache_resource(show_spinner=False)
-def load_llm(api_key: str, model_name: str) -> ChatGoogleGenerativeAI:
-```
-
-Meaning:
-
-- Creates the Gemini chat model once.
-- Streamlit reruns the script often; caching prevents repeated object creation.
-- The API key is passed at runtime but never written to disk.
-
-## 8. Cached Vector Store Loader
+## 6. PDF Loading and Chunking
 
 ```python
 @st.cache_resource(show_spinner=False)
-def load_vectorstore(...):
+def load_corpus(pdf_mtime, chunk_size, chunk_overlap):
 ```
 
 Meaning:
 
-- Creates or loads the Chroma vector store.
-- If `gita_chroma/` exists, it loads the previous index.
-- If not, it reads `gita_book.pdf`, chunks the text, embeds chunks, and persists the index.
-- `PDF_PATH.stat().st_mtime` is an argument so the cache invalidates when the PDF changes.
-- If an old Chroma cache cannot be loaded, the app removes that generated cache and rebuilds it from the PDF.
+- `PyPDFLoader` extracts text from `gita_book.pdf`.
+- `RecursiveCharacterTextSplitter` creates overlapping chunks.
+- `pdf_mtime` makes Streamlit rebuild the cache when the PDF changes.
+- Chunks keep metadata such as page number and chunk index.
 
-## 9. Text Splitting
+## 7. Local Retrieval Index
 
 ```python
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=chunk_size,
-    chunk_overlap=chunk_overlap,
-    separators=["\n\n", "\n", ".", " ", ""],
-)
+def tokenize(text: str) -> list[str]:
+@st.cache_resource(show_spinner=False)
+def load_local_index(...):
 ```
 
 Meaning:
 
-- The Gita PDF is too large to send as one prompt.
-- Chunking creates smaller passages for semantic search.
-- Overlap preserves context across chunk boundaries.
-- Separator order tries to split on paragraphs first, then smaller boundaries.
+- `tokenize()` normalizes words and removes common stopwords.
+- `load_local_index()` builds a TF-IDF style index from the PDF chunks.
+- This index is local, free, fast, and does not need Google APIs.
+- The app can retrieve relevant passages even when a key is missing, suspended, or over quota.
 
-## 10. Retrieval
+## 8. Runtime Resources
 
 ```python
-docs = vectorstore.similarity_search(question, k=top_k)
+def load_runtime_resources() -> RuntimeResources:
 ```
 
 Meaning:
 
-- The user's question is embedded.
-- Chroma finds the most semantically similar Gita chunks.
-- `top_k` controls how many passages are sent to Gemini.
+- Always prepares the local retrieval index.
+- In `local` mode, the app answers with the local answer builder.
+- In `auto` mode, the app uses Gemini if a key is configured and falls back locally if Gemini fails.
+- In `gemini` mode, Gemini errors are shown as setup errors.
 
-## 11. Prompt Construction
+## 9. Retrieval
+
+```python
+docs = local_similarity_search(resources.local_index, question, top_k)
+```
+
+Meaning:
+
+- The question is converted into weighted terms.
+- Each PDF chunk receives a cosine-similarity score.
+- The highest-scoring chunks become the source context for the answer.
+
+## 10. Prompt Construction
 
 ```python
 prompt = build_prompt(name=name, age=age, question=question, context=context)
@@ -158,29 +136,43 @@ Meaning:
 - It asks for a direct answer, reflection, and practical action.
 - It instructs the model not to invent verse numbers.
 
-## 12. Answer Generation
+## 11. Local Answer Builder
 
 ```python
-response = llm.invoke(prompt)
+def build_local_answer(name, age, question, docs):
 ```
 
 Meaning:
 
-- Gemini receives the grounded prompt.
-- The response text is displayed in the chat.
-- Retrieved source documents are saved for the source expander.
+- Creates a structured answer when Gemini is disabled or unavailable.
+- Extracts relevant source sentences from retrieved chunks.
+- Keeps the answer grounded in the PDF and preserves the same user workflow.
+
+## 12. Answer Generation
+
+```python
+def answer_question(resources, name, age, question, top_k):
+```
+
+Meaning:
+
+- Retrieves local source passages first.
+- Uses Gemini when the active runtime includes an LLM.
+- Falls back to the local answer builder in `auto` mode if Gemini fails.
+- Returns answer text, source documents, and an optional runtime notice.
 
 ## 13. Session State
 
 ```python
 st.session_state.messages
 st.session_state.last_sources
+st.session_state.active_engine
 ```
 
 Meaning:
 
-- Streamlit reruns the script after each interaction.
-- Session state keeps profile info, chat history, and the latest retrieved sources.
+- Streamlit reruns the script after interactions.
+- Session state keeps profile info, chat history, retrieved sources, and active runtime mode.
 - This makes the chat feel continuous.
 
 ## 14. Transcript Generation
@@ -205,5 +197,7 @@ if __name__ == "__main__":
 
 Meaning:
 
-- Keeps app startup explicit.
-- `main()` applies the theme, validates config, renders the sidebar and profile form, then loads AI resources only after the user starts a chat session.
+- Applies the theme and validates configuration.
+- Shows the profile form before loading answer resources.
+- Loads runtime resources after the user starts a chat session.
+- Renders either the local or Gemini-backed chat experience.
