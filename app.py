@@ -1,659 +1,711 @@
-# --- OPTIONAL: SQLite3 Fix for Chroma on some environments ---
-# We *attempt* to swap in pysqlite3 if it's available, but we don't require it.
+# Optional sqlite compatibility shim for hosted Linux environments where
+# ChromaDB needs a newer sqlite build than the system Python provides.
 try:
     __import__("pysqlite3")
     import sys
 
     sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 except Exception:
-    # Fall back to default sqlite3; if it's too old, we handle that gracefully later.
     pass
-# --- END SQLite3 Fix ---
+
+import base64
+import os
+import re
+import shutil
+import textwrap
+from pathlib import Path
+from typing import Iterable
+
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
 import streamlit as st
-import os
-import base64
-import json
-import hashlib
-from pathlib import Path
-from dotenv import load_dotenv
-from langchain_community.vectorstores import Chroma
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
-try:
-    from langchain.chains import RetrievalQA
-except Exception:
-    from langchain.chains.retrieval_qa.base import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from fpdf import FPDF
-# Import XPos and YPos for fpdf2 deprecation fixes
-from fpdf.enums import XPos, YPos 
-import time # For streaming effect
-import asyncio # Import asyncio for event loop management
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# ------------------- Load API Key -------------------
-load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-if not GOOGLE_API_KEY:
-    st.error("🚨 Google API Key not found! Please set the GOOGLE_API_KEY environment variable in your `.env` file.")
-    st.stop() # Stop the app if API key is missing
+APP_DIR = Path(__file__).resolve().parent
+PDF_PATH = APP_DIR / "gita_book.pdf"
+BACKGROUND_PATH = APP_DIR / "krishna_ji.jpeg"
+VECTOR_DIR = APP_DIR / "gita_chroma"
+COLLECTION_NAME = "gita_gpt"
 
-# ------------------- Configure Streamlit Page -------------------
+DEFAULT_MODEL = "gemini-1.5-flash"
+DEFAULT_EMBEDDING_MODEL = "models/embedding-001"
+DEFAULT_CHUNK_SIZE = 1000
+DEFAULT_CHUNK_OVERLAP = 150
+DEFAULT_TOP_K = 4
+
+
+def load_local_env(path: Path) -> None:
+    """Load simple KEY=VALUE pairs from .env without requiring extra packages."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_local_env(APP_DIR / ".env")
+
+
+def get_secret(name: str, default: str = "") -> str:
+    """Read a value from Streamlit secrets first, then environment variables."""
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return str(value or os.getenv(name, default)).strip()
+
+
+def get_int_setting(name: str, default: int) -> int:
+    """Parse integer settings safely so bad env values do not crash startup."""
+    raw_value = get_secret(name, str(default))
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY")
+CHAT_MODEL = get_secret("GITA_GPT_MODEL", DEFAULT_MODEL)
+EMBEDDING_MODEL = get_secret("GITA_GPT_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+CHUNK_SIZE = get_int_setting("GITA_GPT_CHUNK_SIZE", DEFAULT_CHUNK_SIZE)
+CHUNK_OVERLAP = get_int_setting("GITA_GPT_CHUNK_OVERLAP", DEFAULT_CHUNK_OVERLAP)
+TOP_K = get_int_setting("GITA_GPT_TOP_K", DEFAULT_TOP_K)
+
+
 st.set_page_config(
-    page_title="Gita GPT - Your Spiritual Companion",
-    page_icon="🕉️",
-    layout="centered",
-    initial_sidebar_state="expanded"
+    page_title="Gita GPT",
+    page_icon="Om",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# ------------------- Custom CSS for Devotional Look and Feel with New Effects -------------------
-def set_custom_css(background_b64):
+
+def image_to_base64(path: Path) -> str:
+    """Convert a local image into a base64 data URL payload for CSS backgrounds."""
+    if not path.exists():
+        return ""
+    return base64.b64encode(path.read_bytes()).decode("utf-8")
+
+
+def apply_theme() -> None:
+    """Inject the visual system for the Streamlit app."""
+    background_b64 = image_to_base64(BACKGROUND_PATH)
+    background_css = (
+        f'linear-gradient(rgba(11, 18, 32, 0.78), rgba(11, 18, 32, 0.9)), '
+        f'url("data:image/jpeg;base64,{background_b64}") center/cover fixed'
+        if background_b64
+        else "linear-gradient(135deg, #0f172a 0%, #312e81 52%, #14532d 100%)"
+    )
+
     st.markdown(
         f"""
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Open+Sans:wght@400;600&family=Playfair+Display:wght=700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-        /* Overall Page Styling */
         .stApp {{
-            background: url("data:image/jpeg;base64,{background_b64}") center center fixed;
-            background-size: cover;
-            color: #E0E0E0; /* Lighter text for dark background */
-            font-family: 'Open Sans', sans-serif;
-            overflow-x: hidden; /* Prevent horizontal scroll */
-            padding-top: 2rem; /* Add some top padding */
+            background: {background_css};
+            color: #f8fafc;
+            font-family: 'Inter', sans-serif;
         }}
 
-        /* Central Container for content */
-        .main-content-container {{
-            background: rgba(0, 0, 0, 0.4); /* Slightly dark, translucent overlay for readability */
-            border-radius: 25px;
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6); /* Stronger, deeper shadow */
-            padding: 3rem;
-            margin: 2rem auto;
-            max-width: 900px; /* Wider content area */
-            animation: fadeInScale 1s ease-out forwards;
-            border: 2px solid #7B1FA2; /* Divine purple border */
+        [data-testid="stSidebar"] {{
+            background: rgba(15, 23, 42, 0.92);
+            border-right: 1px solid rgba(148, 163, 184, 0.25);
         }}
 
-        @keyframes fadeInScale {{
-            from {{ opacity: 0; transform: scale(0.95) translateY(20px); }}
-            to {{ opacity: 1; transform: scale(1) translateY(0); }}
+        .block-container {{
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+            max-width: 1180px;
         }}
 
-        /* Title and Header */
-        h1, h2, h3 {{
-            font-family: 'Playfair Display', serif; /* More elegant font for titles */
-            color: #FFD700; /* Gold for prominence */
-            text-align: center;
-            text-shadow: 0px 0px 15px rgba(255, 215, 0, 0.8), 0px 0px 8px rgba(0,0,0,0.5); /* Glowing effect */
-            margin-bottom: 1.5rem;
-            letter-spacing: 2px;
-            animation: textGlowGold 2s infinite alternate;
+        .hero {{
+            padding: 2rem 0 1rem;
         }}
 
-        @keyframes textGlowGold {{
-            from {{ text-shadow: 0px 0px 10px rgba(255, 215, 0, 0.7), 0px 0px 5px rgba(0,0,0,0.3); }}
-            to {{ text-shadow: 0px 0px 20px rgba(255, 215, 0, 1), 0px 0px 10px rgba(0,0,0,0.5); }}
-        }}
-        
-        /* Subheaders and descriptions */
-        .stMarkdown p, .stMarkdown h4 {{
-            color: #F8F8F8; /* Lighter color for better contrast */
-            text-align: center;
-            font-size: 1.1em;
-            margin-bottom: 1.5rem;
-        }}
-        .stMarkdown p:last-child {{
-            margin-bottom: 0;
-        }}
-
-
-        /* Streamlit components specific overrides */
-        .stTextInput>div>div>input, .stTextArea>div>div>textarea {{
-            background-color: rgba(255, 255, 255, 0.1); /* Subtle, dark background */
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            color: #E0E0E0; /* Lighter text color */
-            border-radius: 15px;
-            padding: 0.8rem 1rem;
-            transition: all 0.3s ease;
-            box-shadow: inset 0 1px 5px rgba(0,0,0,0.2);
-        }}
-        .stTextInput>div>div>input:focus, .stTextArea>div>div>textarea:focus {{
-            border-color: #FFD700; /* Gold focus glow */
-            box-shadow: 0 0 0 0.2rem rgba(255, 215, 0, 0.25), inset 0 1px 5px rgba(0,0,0,0.3);
-            outline: none;
-        }}
-        
-        .stButton>button {{
-            background: linear-gradient(135deg, #9C27B0, #7B1FA2); /* Gradient purple button */
-            color: white;
-            border-radius: 15px;
-            border: none;
-            padding: 0.7rem 1.8rem;
-            font-size: 1.1rem;
-            font-weight: 600;
-            transition: all 0.3s ease;
-            box-shadow: 0px 6px 20px rgba(0,0,0,0.4); /* Deeper shadow */
-            margin: 0.5rem auto;
-            display: block;
+        .eyebrow {{
+            color: #fde68a;
+            font-weight: 700;
+            letter-spacing: 0.16em;
             text-transform: uppercase;
-            letter-spacing: 1px;
-            cursor: pointer;
-        }}
-        .stButton>button:hover {{
-            background: linear-gradient(135deg, #7B1FA2, #6A1B9A); /* Darker gradient on hover */
-            transform: translateY(-3px) scale(1.02);
-            box-shadow: 0px 10px 25px rgba(0,0,0,0.5);
+            font-size: 0.8rem;
         }}
 
-        /* Chat Bubbles */
-        /* Targets the actual content div within chat messages */
-        .st-emotion-cache-eczf16 > div {{ 
-            padding: 1rem 1.2rem;
-            margin-bottom: 1rem;
-            border-radius: 25px; 
-            max-width: 90%; 
-            box-shadow: 0px 4px 15px rgba(0,0,0,0.3); /* Clearer shadow */
-            animation: fadeIn 0.8s ease-out;
-            line-height: 1.6;
-            position: relative;
-            overflow: hidden; 
-            /* Remove backdrop-filter to remove glass effect */
-        }}
-        /* No inner glow, instead a solid background for bubbles */
-        .st-emotion-cache-eczf16 > div::before {{
-            display: none; /* Hide the pseudo-element used for inner glow */
+        .hero h1 {{
+            font-size: clamp(2.4rem, 6vw, 5rem);
+            line-height: 0.95;
+            margin: 0.2rem 0 1rem;
+            color: #ffffff;
         }}
 
-        /* Specific bubble colors based on role (Streamlit internal classes) */
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-18jva2u .st-emotion-cache-eczf16 > div {{ /* User message bubble */
-            background-color: #4A148C; /* Deep purple for user */
-            color: #FFEBEE; /* Light text for user bubble */
-            border: 1px solid rgba(255, 255, 255, 0.2); 
-            margin-left: auto; 
-            border-bottom-right-radius: 8px; 
-            border-top-right-radius: 25px; 
-            border-bottom-left-radius: 25px; 
-            border-top-left-radius: 25px; 
+        .hero p {{
+            max-width: 760px;
+            color: #dbeafe;
+            font-size: 1.1rem;
+            line-height: 1.7;
         }}
 
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-h6n150 .st-emotion-cache-eczf16 > div {{ /* Assistant message bubble */
-            background-color: #1A237E; /* Deep blue for Krishna */
-            color: #E8EAF6; /* Lighter text for Krishna bubble */
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            margin-right: auto; 
-            border-bottom-left-radius: 8px; 
-            border-top-left-radius: 25px; 
-            border-bottom-right-radius: 25px;
-            border-top-right-radius: 25px;
-        }}
-        
-        /* Avatars (Streamlit chat elements) - Adjusting alignment to place message next to avatar */
-        .st-emotion-cache-1c7y2qn {{ /* Targets the overall chat message container */
-            display: flex;
-            align-items: flex-start; /* Align avatar and message to the top */
-            gap: 0.7rem; /* Space between avatar and message */
-            width: 100%; /* Ensure it takes full width */
-            margin-bottom: 0.5rem; /* Reduce space between chat entries */
+        .metric-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 1rem;
+            margin: 1rem 0 1.5rem;
         }}
 
-        /* User message container (avatar on right, content on left of avatar) */
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-18jva2u {{ 
-            flex-direction: row-reverse; 
-            justify-content: flex-start; 
-        }}
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-18jva2u .st-emotion-cache-eczf16 {{ /* User chat content wrapper */
-            margin-left: 0.5rem; 
-            flex-grow: 1; 
-            display: flex; 
-            justify-content: flex-end; 
+        .metric {{
+            border: 1px solid rgba(226, 232, 240, 0.18);
+            background: rgba(15, 23, 42, 0.72);
+            border-radius: 10px;
+            padding: 1rem;
         }}
 
-        /* Assistant chat container (avatar on left, content on right of avatar) */
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-h6n150 {{ 
-            flex-direction: row;
-            justify-content: flex-start;
-        }}
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-h6n150 .st-emotion-cache-eczf16 {{ /* Assistant chat content wrapper */
-            margin-right: 0.5rem; 
-            flex-grow: 1; 
-            display: flex; 
-            justify-content: flex-start; 
+        .metric strong {{
+            display: block;
+            color: #fde68a;
+            font-size: 1.4rem;
         }}
 
-        /* Intro Form */
-        .intro-container {{
-            background: rgba(20, 0, 40, 0.7); /* Darker, more solid background */
-            border: 2px solid #FFD700; /* Gold border */
-            border-radius: 30px; 
-            box-shadow: 0px 10px 40px rgba(0,0,0,0.6);
-            text-align: center;
-            max-width: 550px;
-            margin: 4rem auto; 
-            padding: 3rem;
-            animation: popIn 1s ease-out forwards; 
+        .metric span {{
+            color: #cbd5e1;
+            font-size: 0.92rem;
         }}
-        .intro-container h3 {{
-            color: #FFD700; /* Gold for intro heading */
-            margin-bottom: 2rem;
-            font-size: 1.8rem; 
-            text-shadow: 0px 0px 8px rgba(255, 215, 0, 0.5);
+
+        .section-panel {{
+            border: 1px solid rgba(226, 232, 240, 0.18);
+            background: rgba(15, 23, 42, 0.78);
+            border-radius: 10px;
+            padding: 1.2rem;
+            margin: 1rem 0;
         }}
-        
-        /* Footer */
-        .footer {{
-            font-family: 'Open Sans', sans-serif;
-            font-size: 0.95rem;
-            color: #FFD700; /* Gold color for footer text */
-            text-align: center;
-            padding: 1.8rem;
-            margin-top: 4rem;
-            text-shadow: 1px 1px 4px rgba(0,0,0,0.3);
-            background: rgba(0, 0, 0, 0.5); /* Solid dark background for footer */
-            border-top: 1px solid rgba(255, 215, 0, 0.3); /* Subtle gold border top */
-            border-radius: 15px; /* Keep some rounding */
+
+        .source-box {{
+            border-left: 3px solid #38bdf8;
+            background: rgba(8, 47, 73, 0.55);
+            padding: 0.9rem 1rem;
+            margin: 0.75rem 0;
+            border-radius: 8px;
+            color: #e0f2fe;
         }}
-        
-        /* Sidebar Styling */
-        .st-emotion-cache-vk33gh {{ /* Target the sidebar container */
-            background: rgba(10, 0, 20, 0.8); /* Darker, more solid sidebar */
-            border-right: 1px solid rgba(255, 215, 0, 0.3);
-            box-shadow: 2px 0 15px rgba(0,0,0,0.4);
+
+        .stChatMessage {{
+            background: rgba(15, 23, 42, 0.76);
+            border: 1px solid rgba(226, 232, 240, 0.12);
+            border-radius: 10px;
         }}
-        .st-emotion-cache-vk33gh h2 {{
-            color: #FFD700; /* Gold sidebar header */
-            text-shadow: none;
-            text-align: left;
-            margin-bottom: 1rem;
+
+        .stButton > button,
+        .stDownloadButton > button,
+        [data-testid="stFormSubmitButton"] button {{
+            border-radius: 8px;
+            border: 1px solid rgba(253, 230, 138, 0.5);
+            background: linear-gradient(135deg, #f59e0b, #eab308);
+            color: #111827;
+            font-weight: 800;
         }}
-        .st-emotion-cache-vk33gh .stButton>button {{
-            background: linear-gradient(135deg, #7B1FA2, #6A1B9A);
-            color: white;
-            box-shadow: none; 
-            display: inline-block; 
-            margin: 0.5rem 0;
-            width: 100%;
+
+        .stTextInput input,
+        .stTextArea textarea,
+        .stNumberInput input {{
+            background: rgba(15, 23, 42, 0.88);
+            color: #f8fafc;
+            border-radius: 8px;
         }}
-        .st-emotion-cache-vk33gh .stButton>button:hover {{
-            background: linear-gradient(135deg, #6A1B9A, #4A148C);
-            transform: none;
+
+        @media (max-width: 800px) {{
+            .metric-grid {{
+                grid-template-columns: 1fr;
+            }}
         }}
         </style>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 
-# ------------------- Simple File-Based Authentication -------------------
-USERS_FILE = Path("users.json")
+def render_hero() -> None:
+    """Render the first screen users see."""
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="eyebrow">Bhagavad Gita RAG Companion</div>
+            <h1>Gita GPT</h1>
+            <p>
+                Ask reflective questions and receive guidance grounded in retrieved
+                passages from the Bhagavad Gita. The app combines Gemini, local
+                Chroma retrieval, and a calm Streamlit interface for an end-to-end
+                spiritual Q&A experience.
+            </p>
+        </div>
+        <div class="metric-grid">
+            <div class="metric"><strong>RAG</strong><span>Answers are grounded in the PDF corpus.</span></div>
+            <div class="metric"><strong>Gemini</strong><span>Google Generative AI powers response synthesis.</span></div>
+            <div class="metric"><strong>PDF</strong><span>Download your conversation as a transcript.</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def _hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+def require_configuration() -> None:
+    """Stop early with useful setup instructions if required assets are missing."""
+    missing_items = []
+    if not GOOGLE_API_KEY:
+        missing_items.append("GOOGLE_API_KEY")
+    if not PDF_PATH.exists():
+        missing_items.append("gita_book.pdf")
+
+    if not missing_items:
+        return
+
+    st.error("Gita GPT needs a little setup before it can run.")
+    st.write("Missing: " + ", ".join(missing_items))
+    st.code(
+        "GOOGLE_API_KEY=your_google_gemini_api_key_here\n"
+        "streamlit run app.py",
+        language="bash",
+    )
+    st.stop()
 
 
-def _load_users() -> dict:
-    if not USERS_FILE.exists():
-        return {}
+@st.cache_resource(show_spinner=False)
+def load_llm(api_key: str, model_name: str) -> ChatGoogleGenerativeAI:
+    """Create the Gemini chat model once per app process."""
+    return ChatGoogleGenerativeAI(
+        model=model_name,
+        google_api_key=api_key,
+        temperature=0.55,
+    )
+
+
+def build_vectorstore(
+    embedding_model: str,
+    embeddings,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> Chroma:
+    """Create a fresh Chroma vector store from the bundled Gita PDF."""
+    loader = PyPDFLoader(str(PDF_PATH))
+    pages = loader.load()
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ".", " ", ""],
+    )
+    chunks = splitter.split_documents(pages)
+    if not chunks:
+        raise RuntimeError("No text chunks were created from gita_book.pdf.")
+
+    for index, chunk in enumerate(chunks):
+        chunk.metadata["chunk_index"] = index
+        chunk.metadata["source"] = "Bhagavad Gita"
+        chunk.metadata["embedding_model"] = embedding_model
+
+    return Chroma.from_documents(
+        chunks,
+        embedding=embeddings,
+        persist_directory=str(VECTOR_DIR),
+        collection_name=COLLECTION_NAME,
+    )
+
+
+def clear_chroma_client_cache() -> None:
+    """Clear Chroma's in-process client cache before rebuilding generated data."""
     try:
-        with USERS_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        from chromadb.api.shared_system_client import SharedSystemClient
+
+        SharedSystemClient.clear_system_cache()
     except Exception:
-        return {}
+        pass
 
 
-def _save_users(users: dict) -> None:
-    try:
-        with USERS_FILE.open("w", encoding="utf-8") as f:
-            json.dump(users, f, indent=2)
-    except Exception:
-        st.error("Unable to save user data. Please check file permissions.")
+def remove_vector_cache() -> None:
+    """Remove the generated vector cache so it can be rebuilt from the PDF."""
+    clear_chroma_client_cache()
+    shutil.rmtree(VECTOR_DIR, ignore_errors=True)
+    clear_chroma_client_cache()
 
 
-def register_user(username: str, password: str, display_name: str, age: int) -> bool:
-    users = _load_users()
-    username = username.strip().lower()
-    if not username or not password:
-        st.warning("Username and password cannot be empty.")
-        return False
-    if username in users:
-        st.warning("This username is already taken. Please choose another.")
-        return False
+@st.cache_resource(show_spinner=False)
+def load_vectorstore(
+    api_key: str,
+    embedding_model: str,
+    pdf_mtime: float,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> Chroma:
+    """Load or build the persistent Chroma vector store from the Gita PDF."""
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model=embedding_model,
+        google_api_key=api_key,
+    )
 
-    users[username] = {
-        "password_hash": _hash_password(password),
-        "display_name": display_name.strip() or username,
-        "age": age,
-    }
-    _save_users(users)
-    return True
+    if VECTOR_DIR.exists() and any(VECTOR_DIR.iterdir()):
+        try:
+            vectorstore = Chroma(
+                persist_directory=str(VECTOR_DIR),
+                embedding_function=embeddings,
+                collection_name=COLLECTION_NAME,
+            )
+            if vectorstore._collection.count() <= 0:
+                raise RuntimeError("Existing vector cache is empty.")
+            return vectorstore
+        except Exception:
+            remove_vector_cache()
+
+    return build_vectorstore(embedding_model, embeddings, chunk_size, chunk_overlap)
 
 
-def authenticate_user(username: str, password: str):
-    users = _load_users()
-    username = username.strip().lower()
-    user = users.get(username)
-    if not user:
-        return None
-    if user.get("password_hash") != _hash_password(password):
-        return None
-    return {"username": username, "display_name": user.get("display_name", username), "age": user.get("age")}
+def normalize_text(text: str) -> str:
+    """Collapse excess whitespace for cleaner prompts and source previews."""
+    return re.sub(r"\s+", " ", text).strip()
 
-# ------------------- Load LLM -------------------
-llm = ChatGoogleGenerativeAI(
-    model="models/gemini-1.5-flash",
-    google_api_key=GOOGLE_API_KEY,
-)
 
-# ------------------- Load and Embed PDF -------------------
-@st.cache_resource
-def create_vectorstore(pdf_path):
-    # Ensure an asyncio event loop is available for GoogleGenerativeAIEmbeddings
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+def redact_sensitive_text(text: str) -> str:
+    """Remove accidental secrets from provider errors before rendering them."""
+    secret_patterns = [
+        r"AIza[0-9A-Za-z_-]+",
+        r"ghp_[0-9A-Za-z_]+",
+        r"github_pat_[0-9A-Za-z_]+",
+    ]
+    redacted = text
+    for pattern in secret_patterns:
+        redacted = re.sub(pattern, "[redacted-secret]", redacted)
+    return redacted
 
-    if not os.path.exists(pdf_path):
-        st.error(f"Error: PDF file not found at '{pdf_path}'. Please ensure '{pdf_path}' is in the same directory as your app.")
-        return None # Indicate failure
-    
-    try:
-        loader = PyPDFLoader(pdf_path)
-        pages = loader.load()
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        docs = splitter.split_documents(pages)
 
-        if not docs:
-            st.error("Text splitting failed. No chunks were created from the PDF. The PDF might be empty or unreadable.")
-            return None
+def friendly_error_message(error: Exception) -> str:
+    """Convert provider exceptions into concise, safe setup guidance."""
+    message = redact_sensitive_text(str(error))
+    if "CONSUMER_SUSPENDED" in message or "has been suspended" in message:
+        return (
+            "Google rejected the configured API key because the associated "
+            "consumer is suspended. Create or enable a valid Gemini API key, "
+            "set it as GOOGLE_API_KEY, and restart the app."
+        )
+    if "403" in message and "Permission denied" in message:
+        return (
+            "Google returned a permission error. Check that the Generative "
+            "Language API is enabled, the key is valid, and any key "
+            "restrictions allow this deployment."
+        )
+    if "Timeout" in message or "failed to connect" in message:
+        return (
+            "The app could not reach Google APIs before the request timed out. "
+            "Check outbound network access from this machine or host."
+        )
+    return message
 
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001",
-            google_api_key=GOOGLE_API_KEY,
+
+def format_sources(docs: Iterable) -> str:
+    """Create compact source context for the Gemini prompt."""
+    source_blocks = []
+    for index, doc in enumerate(docs, start=1):
+        page = doc.metadata.get("page")
+        page_label = f"page {int(page) + 1}" if isinstance(page, int) else "source passage"
+        source_blocks.append(
+            f"[Source {index} | {page_label}]\n{normalize_text(doc.page_content)}"
+        )
+    return "\n\n".join(source_blocks)
+
+
+def build_prompt(name: str, age: int | None, question: str, context: str) -> str:
+    """Compose the final grounded prompt sent to Gemini."""
+    age_text = f", age {age}" if age else ""
+    return f"""
+You are Gita GPT, a compassionate spiritual guide inspired by Lord Krishna's
+teachings in the Bhagavad Gita. Address the seeker named {name}{age_text}.
+
+Use only the provided Bhagavad Gita source passages for scriptural grounding.
+If the passages do not fully answer the question, say so with humility and give
+a careful reflective answer based on the available context. Do not invent verse
+numbers. Do not claim to be a medical, legal, or financial authority.
+
+Structure the response with:
+1. A direct answer.
+2. A Gita-grounded reflection.
+3. A practical action the seeker can take today.
+
+Source passages:
+{context}
+
+Seeker's question:
+{question}
+""".strip()
+
+
+def answer_question(
+    llm: ChatGoogleGenerativeAI,
+    vectorstore: Chroma,
+    name: str,
+    age: int | None,
+    question: str,
+    top_k: int,
+) -> tuple[str, list]:
+    """Retrieve relevant passages, ask Gemini, and return answer plus sources."""
+    docs = vectorstore.similarity_search(question, k=top_k)
+    context = format_sources(docs)
+    prompt = build_prompt(name=name, age=age, question=question, context=context)
+    response = llm.invoke(prompt)
+    return str(response.content), docs
+
+
+def pdf_escape(text: str) -> str:
+    """Escape text for a simple PDF text object."""
+    safe_text = text.encode("latin-1", "replace").decode("latin-1")
+    return safe_text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def build_transcript_pdf(name: str, messages: list[dict]) -> bytes:
+    """Generate a small PDF transcript without external PDF dependencies."""
+    lines = [f"Gita GPT Conversation with {name}", ""]
+    for message in messages:
+        role = "You" if message["role"] == "user" else "Gita GPT"
+        lines.append(f"{role}:")
+        for paragraph in message["content"].splitlines() or [""]:
+            lines.extend(textwrap.wrap(paragraph, width=92) or [""])
+        lines.append("")
+
+    pages = [lines[index : index + 46] for index in range(0, len(lines), 46)] or [[]]
+    objects: list[bytes] = [
+        b"",
+        b"",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    page_ids = []
+
+    for page_lines in pages:
+        commands = ["BT", "/F1 11 Tf", "14 TL"]
+        y = 792
+        for line in page_lines:
+            commands.append(f"1 0 0 1 54 {y} Tm ({pdf_escape(line)}) Tj")
+            y -= 15
+        commands.append("ET")
+        stream = "\n".join(commands).encode("latin-1", "replace")
+        content_id = len(objects) + 1
+        objects.append(
+            f"<< /Length {len(stream)} >>\nstream\n".encode("latin-1")
+            + stream
+            + b"\nendstream"
+        )
+        page_id = len(objects) + 1
+        page_ids.append(page_id)
+        objects.append(
+            (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+            ).encode("latin-1")
         )
 
-        # Persist directory for faster loading on subsequent runs
-        persist_directory = "./gita_chroma"
-        if os.path.exists(persist_directory) and os.listdir(persist_directory):
-            st.info("Loading existing spiritual wisdom repository (vector store)...")
-            vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        else:
-            st.info("Creating spiritual wisdom repository (vector store) from Gita...")
-            vectorstore = Chroma.from_documents(
-                docs, embedding=embeddings, persist_directory=persist_directory
-            )
-            st.success("Spiritual wisdom repository created successfully!")
-        return vectorstore
-    except Exception as e:
-        # Catch specific sqlite3 error for a more user-friendly message
-        if "sqlite3" in str(e).lower() and "unsupported version" in str(e).lower():
-            st.error("🚨 Critical Error: Your system has an unsupported version of sqlite3 for ChromaDB. "
-                     "This issue is typically resolved by ensuring 'pysqlite3-binary' is in your requirements.txt "
-                     "and the module swap code is at the very top of your app.py. "
-                     "If you are deploying on Streamlit Cloud, these steps are crucial.")
-        else:
-            st.error(f"Failed to load or process PDF for embeddings: {e}")
-        return None # Indicate failure
-
-# Load background image once and pass its base64 to CSS
-background_b64 = ""
-try:
-    with open("krishna_ji.jpeg", "rb") as img: # Ensure this is the correct filename
-        background_b64 = base64.b64encode(img.read()).decode()
-    set_custom_css(background_b64) # Pass the base64 string here
-except FileNotFoundError:
-    st.error("Background image 'krishna_ji.jpeg' not found. Please ensure it's in the same directory.")
-    st.stop()
-except Exception as e:
-    st.error(f"Error loading background image: {e}")
-    st.stop()
-
-# Initialize vectorstore and QA chain
-qa_chain = None
-vectorstore_initialized = False
-try:
-    vectorstore = create_vectorstore("gita_book.pdf")
-    if vectorstore:
-        qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=vectorstore.as_retriever(), return_source_documents=False)
-        vectorstore_initialized = True
-    else:
-        st.warning("Could not initialize the spiritual wisdom repository (vector store). I will answer as Kanha based on my general knowledge.")
-except Exception as e:
-    st.warning(f"An error occurred during vector store initialization: {e}. I will answer as Kanha based on my general knowledge.")
-
-
-# ------------------- Authentication Gate -------------------
-if "auth_user" not in st.session_state:
-    st.session_state.auth_user = None
-
-if not st.session_state.auth_user:
-    st.markdown("<div class='intro-container'>", unsafe_allow_html=True)
-    st.subheader("🙏 Welcome, Seeker! Please sign in to continue.")
-    st.markdown("---")
-
-    auth_mode = st.radio(
-        "Choose your path:",
-        options=["Login", "Register"],
-        horizontal=True,
-        label_visibility="collapsed",
+    kids = " ".join(f"{page_id} 0 R" for page_id in page_ids)
+    objects[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objects[1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>".encode(
+        "latin-1"
     )
 
-    if auth_mode == "Login":
-        with st.form("login_form"):
-            username = st.text_input("Username", max_chars=50)
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("🔐 Enter the Realm")
-            if submitted:
-                user = authenticate_user(username, password)
-                if user:
-                    st.session_state.auth_user = user
-                    # Also sync legacy name/age for rest of UI
-                    st.session_state.name = user["display_name"]
-                    st.session_state.age = user.get("age", "")
-                    st.success(f"Welcome back, {user['display_name']}!")
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password. Please try again.")
-    else:
-        with st.form("register_form"):
-            username = st.text_input("Choose a username", max_chars=50)
-            password = st.text_input("Choose a password", type="password")
-            confirm_password = st.text_input("Confirm password", type="password")
-            display_name = st.text_input("Your sacred name (optional)", max_chars=50)
-            age_str = st.text_input("How many springs have you witnessed?", max_chars=3, placeholder="Your Age in Years...")
-            submitted = st.form_submit_button("🌟 Create Devotee Account")
-            if submitted:
-                if password != confirm_password:
-                    st.warning("Passwords do not match.")
-                elif not age_str.strip().isdigit():
-                    st.warning("Please provide a valid numeric age.")
-                else:
-                    age_val = int(age_str.strip())
-                    if register_user(username, password, display_name or username, age_val):
-                        st.success("Account created successfully! Please log in with your new credentials.")
-                    else:
-                        st.info("Unable to create account. Please adjust your details and try again.")
+    output = b"%PDF-1.4\n"
+    offsets = [0]
+    for object_id, payload in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output += f"{object_id} 0 obj\n".encode("latin-1") + payload + b"\nendobj\n"
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    xref_start = len(output)
+    output += f"xref\n0 {len(objects) + 1}\n".encode("latin-1")
+    output += b"0000000000 65535 f \n"
+    for offset in offsets[1:]:
+        output += f"{offset:010d} 00000 n \n".encode("latin-1")
+    output += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_start}\n%%EOF\n"
+    ).encode("latin-1")
+    return output
 
-# ------------------- Intro Screen (Modal-like) -------------------
-elif "name" not in st.session_state or not st.session_state.name:
-    # Use authenticated profile to pre-fill name and age
-    st.session_state.name = st.session_state.auth_user.get("display_name") if st.session_state.auth_user else ""
-    st.session_state.age = st.session_state.auth_user.get("age") if st.session_state.auth_user else ""
 
-    # This div contains the intro form and applies the new styling
-    st.markdown("<div class='intro-container'>", unsafe_allow_html=True)
-    st.subheader("🙏 Welcome, Seeker! Let's embark on this spiritual journey.")
-    st.markdown("---") # Visual separator
-    
-    with st.form("intro_form", clear_on_submit=True):
-        name = st.text_input("What is your sacred name?", max_chars=50, value=str(st.session_state.name or ""), placeholder="Your Devotional Name...")
-        age = st.text_input("How many springs have you witnessed?", max_chars=3, value=str(st.session_state.age or ""), placeholder="Your Age in Years...")
-        
-        # Use a more thematic button text
-        submitted = st.form_submit_button("🕊️ Enter the Realm of Gita's Wisdom")
+def initialize_session() -> None:
+    """Create all Streamlit session keys used by the app."""
+    defaults = {
+        "profile_ready": False,
+        "name": "",
+        "age": None,
+        "intention": "",
+        "messages": [],
+        "last_sources": [],
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-        if submitted:
-            if name.strip() and age.strip().isdigit():
-                st.session_state.name = name.strip()
-                st.session_state.age = int(age.strip())
-                # Update profile with refined name/age
-                if st.session_state.auth_user:
-                    users = _load_users()
-                    profile = users.get(st.session_state.auth_user["username"], {})
-                    profile["display_name"] = st.session_state.name
-                    profile["age"] = st.session_state.age
-                    profile["password_hash"] = profile.get("password_hash", "")
-                    users[st.session_state.auth_user["username"]] = profile
-                    _save_users(users)
-                    st.session_state.auth_user["display_name"] = st.session_state.name
-                    st.session_state.auth_user["age"] = st.session_state.age
-                st.rerun() # Rerun to switch to chat interface
-            else:
-                st.warning("Please gracefully provide a valid name and numeric age to proceed on this path.")
-    st.markdown("</div>", unsafe_allow_html=True)
 
-# ------------------- Chat Interface -------------------
-else:
-    # Main content wrapper (replaces the 'glass-effect' for the whole chat area)
-    st.markdown("<div class='main-content-container'>", unsafe_allow_html=True)
-    st.markdown(f"### 🌸 Namaste, **{st.session_state.name}** (Age: {st.session_state.age})")
-    st.markdown("*Seek guidance, and let Lord Krishna illuminate your path through the timeless wisdom of the Bhagavad Gita.*")
+def render_profile_form() -> None:
+    """Collect lightweight seeker context before opening the chat."""
+    st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+    st.subheader("Begin your dialogue")
+    with st.form("profile_form"):
+        name = st.text_input("Name", placeholder="Arjuna")
+        age = st.number_input("Age", min_value=1, max_value=120, value=21)
+        intention = st.text_area(
+            "What guidance are you seeking?",
+            placeholder="Clarity, discipline, purpose, peace, duty, devotion...",
+            height=100,
+        )
+        submitted = st.form_submit_button("Start Gita GPT")
 
-    if "messages" not in st.session_state:
+    if submitted:
+        st.session_state.name = name.strip() or "Seeker"
+        st.session_state.age = int(age)
+        st.session_state.intention = intention.strip()
+        st.session_state.profile_ready = True
         st.session_state.messages = []
-        st.session_state.chat_history = []
+        st.session_state.last_sources = []
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    # Display chat messages from history on app rerun
-    chat_container = st.container(height=500, border=False) # border=False because we apply custom styling
-    
-    with chat_container:
-        for message in st.session_state.messages:
-            if message["role"] == "user":
-                with st.chat_message("user", avatar="🧍‍♂️"): # Using emoji as avatar
-                    st.write(message["content"])
-            else:
-                with st.chat_message("assistant", avatar="🧘"): # Using emoji as avatar
-                    st.write(message["content"])
 
-    user_input = st.chat_input("🙏 Offer your question to Krishna...")
-
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        # Process AI response
-        with st.spinner("Krishna is contemplating your profound question..."):
-            if vectorstore_initialized and qa_chain:
-                # Original prompt with added persona instruction
-                prompt_with_persona = (
-                    f"You are Lord Krishna from the Bhagavad Gita, addressing {st.session_state.name}, a seeker aged {st.session_state.age}. "
-                    "Your responses should be imbued with the wisdom, compassion, and authority of the Gita. "
-                    "Answer the following question as if I am Arjuna seeking guidance, always drawing upon the principles and teachings of the Bhagavad Gita. "
-                    "Do not break character. Do not mention that you are an AI or a language model. "
-                    f"Here is the seeker's query: {user_input}"
-                )
-                # Correct way to invoke a RetrievalQA chain
-                response_dict = qa_chain.invoke({"query": prompt_with_persona})
-                response = response_dict.get("result", "My dear devotee, I cannot find a direct answer in the scriptures for this. Please ask another question.")
-            else:
-                # Fallback to direct LLM if vector store not available
-                fallback_prompt = (
-                    f"You are Lord Krishna, addressing {st.session_state.name}, a seeker aged {st.session_state.age}. "
-                    "Though my sacred texts are momentarily beyond reach, I shall share wisdom based on the eternal truths I embody. "
-                    "Answer the following question as if I am Arjuna seeking guidance. "
-                    "Do not break character. Do not mention that you are an AI or a language model. "
-                    f"Here is the seeker's query: {user_input}"
-                )
-                response = llm.invoke(fallback_prompt).content
-            
-            # Append assistant's response to messages for immediate display after processing
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            st.session_state.chat_history.append((user_input, response))
-            
-            # Re-run the app to update the chat display with both new messages
-            st.rerun() 
-
-    st.markdown("</div>", unsafe_allow_html=True) # Close the main-content-container
-
-    # ------------------- Sidebar (Applying glass-effect) -------------------
+def render_sidebar() -> None:
+    """Render operational controls and status in the sidebar."""
     with st.sidebar:
-        st.header("🗂️ Sacred Options")
-        if st.session_state.auth_user:
-            st.markdown(
-                f"**Signed in as:** `{st.session_state.auth_user['username']}`  \n"
-                f"**Devotional name:** {st.session_state.auth_user.get('display_name', '')}"
-            )
-            if st.button("🚪 Log Out"):
-                for key in ["auth_user", "name", "age", "messages", "chat_history"]:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.success("You have gracefully signed out. May we meet again on this sacred path.")
-                st.rerun()
-        st.markdown("<div class='sidebar-options-container'>", unsafe_allow_html=True) # New wrapper for sidebar options
-        if st.button("🔄 Clear Our Dialogue"):
+        st.title("Gita GPT")
+        st.caption("Grounded spiritual Q&A powered by Gemini and local retrieval.")
+
+        st.subheader("Runtime")
+        st.write(f"Model: `{CHAT_MODEL}`")
+        st.write(f"Embedding: `{EMBEDDING_MODEL}`")
+        st.write(f"Top K: `{TOP_K}`")
+        st.write(f"Vector store: `{VECTOR_DIR.name}`")
+        st.write(f"PDF: `{PDF_PATH.name}`")
+
+        st.subheader("Session")
+        if st.session_state.profile_ready:
+            st.write(f"Name: **{st.session_state.name}**")
+            st.write(f"Age: **{st.session_state.age}**")
+            if st.session_state.intention:
+                st.write(f"Intention: {st.session_state.intention}")
+
+        if st.button("Clear chat"):
             st.session_state.messages = []
-            st.session_state.chat_history = []
-            st.success("Your dialogue with Krishna has been cleared. A fresh start awaits!")
-            st.rerun() 
-        
-        def save_transcript(chat):
-            pdf = FPDF()
-            # --- FIX: Add page before drawing anything ---
-            pdf.add_page() 
+            st.session_state.last_sources = []
+            st.rerun()
 
-            # Addressing DeprecationWarning: Substituting font arial by core font helvetica
-            pdf.set_font("helvetica", size=12) 
-            pdf.set_text_color(255, 215, 0) # Gold text for PDF for elegance
-            
-            # Addressing DeprecationWarning: The parameter "txt" has been renamed to "text"
-            # Addressing DeprecationWarning: The parameter "ln" is deprecated.
-            pdf.cell(w=0, h=15, text=f"Bhagavad Gita GPT - Conversation with {st.session_state.name}", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
-            pdf.ln(10) 
+        if st.button("Reset profile"):
+            for key in ["profile_ready", "name", "age", "intention", "messages", "last_sources"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
 
-            for q, a in chat:
-                # Addressing DeprecationWarning: Substituting font arial by core font helvetica
-                pdf.set_font("helvetica", "B", 10) 
-                pdf.multi_cell(w=0, h=8, text=f"You: {q}") # Use text= instead of txt=
-                pdf.ln(2) 
-
-                # Addressing DeprecationWarning: Substituting font arial by core font helvetica
-                pdf.set_font("helvetica", "", 10) 
-                pdf.set_text_color(173, 216, 230) # Light blue for Krishna's words in PDF
-                pdf.multi_cell(w=0, h=8, text=f"Krishna: {a}") # Use text= instead of txt=
-                pdf.set_text_color(255, 215, 0) # Reset to gold
-                pdf.ln(8) 
-            
-            pdf.ln(10)
-            # Addressing DeprecationWarning: Substituting font arial by core font helvetica
-            pdf.set_font("helvetica", "I", 8) 
-            pdf.set_text_color(150, 150, 150) 
-            # Addressing DeprecationWarning: The parameter "ln" is deprecated.
-            pdf.cell(w=0, h=10, text="Generated by Gita GPT, your spiritual companion.", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
-            
-            # --- THE CORRECT FIX FOR 'bytearray' object has no attribute 'encode' ---
-            # fpdf2.output() by default returns a bytearray, which needs to be converted to bytes for Streamlit.
-            # The 'dest' parameter is also deprecated, so it's removed.
-            return bytes(pdf.output())
+        if st.session_state.messages:
+            transcript = build_transcript_pdf(st.session_state.name, st.session_state.messages)
+            st.download_button(
+                "Download transcript",
+                data=transcript,
+                file_name=f"gita_gpt_{st.session_state.name.replace(' ', '_')}.pdf",
+                mime="application/pdf",
+            )
 
 
-        if st.button("📄 Preserve This Wisdom (Download Transcript)"):
-            if st.session_state.chat_history:
-                pdf_output = save_transcript(st.session_state.chat_history)
-                st.download_button(
-                    label="⬇️ Download PDF of Our Dialogue",
-                    data=pdf_output,
-                    file_name=f"gita_chat_{st.session_state.name.replace(' ', '_')}.pdf",
-                    mime="application/pdf",
-                    help="Download your conversation as a PDF file to cherish the wisdom."
+def render_chat(llm: ChatGoogleGenerativeAI, vectorstore: Chroma) -> None:
+    """Render chat history, handle user input, and display source passages."""
+    st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+    st.subheader(f"Namaste, {st.session_state.name}")
+    if st.session_state.intention:
+        st.caption(f"Your intention: {st.session_state.intention}")
+
+    if not st.session_state.messages:
+        st.info("Ask about duty, fear, discipline, detachment, purpose, grief, focus, or inner conflict.")
+
+    for message in st.session_state.messages:
+        avatar = ":material/self_improvement:" if message["role"] == "assistant" else ":material/person:"
+        with st.chat_message(message["role"], avatar=avatar):
+            st.write(message["content"])
+
+    user_question = st.chat_input("Ask your question...")
+    if user_question:
+        st.session_state.messages.append({"role": "user", "content": user_question})
+        with st.chat_message("user", avatar=":material/person:"):
+            st.write(user_question)
+
+        with st.chat_message("assistant", avatar=":material/self_improvement:"):
+            with st.spinner("Retrieving Gita passages and preparing an answer..."):
+                try:
+                    answer, sources = answer_question(
+                        llm=llm,
+                        vectorstore=vectorstore,
+                        name=st.session_state.name,
+                        age=st.session_state.age,
+                        question=user_question,
+                        top_k=TOP_K,
+                    )
+                except Exception as exc:
+                    answer = (
+                        "I could not complete the retrieval or Gemini response. "
+                        "Please check your API key, quota, and network access. "
+                        f"Details: {friendly_error_message(exc)}"
+                    )
+                    sources = []
+
+            st.write(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            st.session_state.last_sources = sources
+
+    if st.session_state.last_sources:
+        with st.expander("View retrieved source passages"):
+            for index, doc in enumerate(st.session_state.last_sources, start=1):
+                page = doc.metadata.get("page")
+                page_label = f"Page {int(page) + 1}" if isinstance(page, int) else "Source"
+                st.markdown(
+                    f"""
+                    <div class="source-box">
+                        <strong>Source {index} - {page_label}</strong><br>
+                        {normalize_text(doc.page_content)[:900]}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
-            else:
-                st.warning("There is no divine conversation to preserve yet.")
-        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
-    # ------------------- Footer -------------------
-    st.markdown('<div class="footer">🌼 May Krishna’s wisdom ever guide your path. <br>Created with ❤️ and devotion by <strong>Anish Kumar</strong></div>', unsafe_allow_html=True)
+def main() -> None:
+    """Streamlit entrypoint."""
+    apply_theme()
+    render_hero()
+    require_configuration()
+    initialize_session()
+    render_sidebar()
+
+    if not st.session_state.profile_ready:
+        render_profile_form()
+        return
+
+    try:
+        with st.spinner("Preparing the Gita knowledge base..."):
+            llm = load_llm(GOOGLE_API_KEY, CHAT_MODEL)
+            vectorstore = load_vectorstore(
+                GOOGLE_API_KEY,
+                EMBEDDING_MODEL,
+                PDF_PATH.stat().st_mtime,
+                CHUNK_SIZE,
+                CHUNK_OVERLAP,
+            )
+    except Exception as exc:
+        st.error("Gita GPT could not prepare the knowledge base.")
+        st.write(
+            "Check the Google API key, Generative Language API access, quota, "
+            "and outbound network access from this machine or deployment host."
+        )
+        st.code(friendly_error_message(exc), language="text")
+        st.stop()
+
+    render_chat(llm, vectorstore)
+
+
+if __name__ == "__main__":
+    main()
