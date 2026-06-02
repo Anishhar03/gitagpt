@@ -21,6 +21,7 @@ Meaning:
 ```python
 load_local_env(APP_DIR / ".env")
 GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY")
+CHAT_MODEL = get_secret("GITA_GPT_MODEL", DEFAULT_MODEL)
 ENGINE = get_secret("GITA_GPT_ENGINE", DEFAULT_ENGINE).lower()
 ```
 
@@ -31,6 +32,7 @@ Meaning:
 - `GITA_GPT_ENGINE=local` works without a Google key.
 - `GITA_GPT_ENGINE=auto` tries Gemini when a key is present and falls back locally.
 - `GITA_GPT_ENGINE=gemini` requires a valid Google key.
+- `GITA_GPT_MODEL` defaults to `gemini-2.5-flash`.
 
 ## 3. Streamlit Page Setup
 

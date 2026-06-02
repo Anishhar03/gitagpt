@@ -20,11 +20,13 @@ APP_DIR = Path(__file__).resolve().parent
 PDF_PATH = APP_DIR / "gita_book.pdf"
 BACKGROUND_PATH = APP_DIR / "krishna_ji.jpeg"
 
-DEFAULT_MODEL = "gemini-1.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_ENGINE = "local"
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 150
 DEFAULT_TOP_K = 4
+DEFAULT_LLM_TIMEOUT = 20.0
+DEFAULT_LLM_MAX_RETRIES = 1
 STOPWORDS = {
     "about",
     "after",
@@ -115,12 +117,23 @@ def get_int_setting(name: str, default: int) -> int:
         return default
 
 
+def get_float_setting(name: str, default: float) -> float:
+    """Parse float settings safely so bad env values do not crash startup."""
+    raw_value = get_secret(name, str(default))
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
 GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY")
 CHAT_MODEL = get_secret("GITA_GPT_MODEL", DEFAULT_MODEL)
 ENGINE = get_secret("GITA_GPT_ENGINE", DEFAULT_ENGINE).lower()
 CHUNK_SIZE = get_int_setting("GITA_GPT_CHUNK_SIZE", DEFAULT_CHUNK_SIZE)
 CHUNK_OVERLAP = get_int_setting("GITA_GPT_CHUNK_OVERLAP", DEFAULT_CHUNK_OVERLAP)
 TOP_K = get_int_setting("GITA_GPT_TOP_K", DEFAULT_TOP_K)
+LLM_TIMEOUT = get_float_setting("GITA_GPT_LLM_TIMEOUT", DEFAULT_LLM_TIMEOUT)
+LLM_MAX_RETRIES = get_int_setting("GITA_GPT_LLM_MAX_RETRIES", DEFAULT_LLM_MAX_RETRIES)
 
 
 @dataclass
@@ -322,12 +335,19 @@ def require_configuration() -> None:
 
 
 @st.cache_resource(show_spinner=False)
-def load_llm(api_key: str, model_name: str) -> ChatGoogleGenerativeAI:
+def load_llm(
+    api_key: str,
+    model_name: str,
+    timeout_seconds: float,
+    max_retries: int,
+) -> ChatGoogleGenerativeAI:
     """Create the Gemini chat model once per app process."""
     return ChatGoogleGenerativeAI(
         model=model_name,
         google_api_key=api_key,
         temperature=0.55,
+        timeout=timeout_seconds,
+        max_retries=max_retries,
     )
 
 
@@ -570,7 +590,7 @@ def load_runtime_resources() -> RuntimeResources:
     try:
         return RuntimeResources(
             mode="gemini",
-            llm=load_llm(GOOGLE_API_KEY, CHAT_MODEL),
+            llm=load_llm(GOOGLE_API_KEY, CHAT_MODEL, LLM_TIMEOUT, LLM_MAX_RETRIES),
             local_index=local_index,
         )
     except Exception as exc:

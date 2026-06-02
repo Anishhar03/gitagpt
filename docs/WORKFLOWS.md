@@ -59,14 +59,14 @@ Streamlit Cloud:
 
 1. Push the repository to GitHub.
 2. Create a Streamlit app from the repository.
-3. Keep `GITA_GPT_ENGINE=local` for a no-key deployment, or set `GITA_GPT_ENGINE=auto` and `GOOGLE_API_KEY` for Gemini.
+3. Keep `GITA_GPT_ENGINE=local` for a no-key deployment, or set `GITA_GPT_ENGINE=auto`, `GOOGLE_API_KEY`, and `GITA_GPT_MODEL=gemini-2.5-flash` for Gemini.
 4. Deploy `app.py`.
 5. The app builds the local PDF index on first use.
 
 Docker:
 
 1. Build the container image.
-2. Run the container locally with no key, or pass `GOOGLE_API_KEY` and `GITA_GPT_ENGINE=auto` for Gemini.
+2. Run the container locally with no key, or pass `GOOGLE_API_KEY`, `GITA_GPT_ENGINE=auto`, and `GITA_GPT_MODEL=gemini-2.5-flash` for Gemini.
 3. Expose port `8501`.
 4. Open the app in a browser.
 

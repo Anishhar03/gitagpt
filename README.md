@@ -89,6 +89,7 @@ To enable Gemini with a valid key:
 ```bash
 GITA_GPT_ENGINE=auto
 GOOGLE_API_KEY=your_google_gemini_api_key_here
+GITA_GPT_MODEL=gemini-2.5-flash
 ```
 
 Never commit `.env`.
@@ -111,7 +112,9 @@ http://localhost:8501
 |---|---:|---|---|
 | `GITA_GPT_ENGINE` | No | `local` | `local` works offline, `auto` tries Gemini then falls back, `gemini` requires Google. |
 | `GOOGLE_API_KEY` | Only for Gemini | none | Google Generative Language API key used by Gemini answer synthesis. |
-| `GITA_GPT_MODEL` | No | `gemini-1.5-flash` | Chat model used for answer generation. |
+| `GITA_GPT_MODEL` | No | `gemini-2.5-flash` | Chat model used for answer generation. |
+| `GITA_GPT_LLM_TIMEOUT` | No | `20` | Seconds to wait for a Gemini response before falling back in `auto` mode. |
+| `GITA_GPT_LLM_MAX_RETRIES` | No | `1` | Gemini retry count before fallback or error handling. |
 | `GITA_GPT_CHUNK_SIZE` | No | `1000` | Character target for each PDF chunk. |
 | `GITA_GPT_CHUNK_OVERLAP` | No | `150` | Character overlap between chunks to preserve context. |
 | `GITA_GPT_TOP_K` | No | `4` | Number of retrieved passages used for each answer. |

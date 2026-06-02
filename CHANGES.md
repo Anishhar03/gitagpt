@@ -1,5 +1,11 @@
 # Changes
 
+## 2026-06-02
+
+- Activated the Gemini-ready configuration around `gemini-2.5-flash`, replacing the older default model.
+- Added Gemini timeout and retry settings so `auto` mode falls back quickly when a deployment cannot reach Google APIs.
+- Updated environment examples and deployment docs with the working Gemini model settings.
+
 ## 2026-05-27
 
 - Rebuilt the Streamlit app into an end-to-end Gita RAG assistant powered by local PDF retrieval, optional Gemini synthesis, LangChain, and the bundled Bhagavad Gita PDF.

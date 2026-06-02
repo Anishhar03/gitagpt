@@ -43,6 +43,7 @@ Gemini with automatic local fallback:
 ```text
 GITA_GPT_ENGINE=auto
 GOOGLE_API_KEY=your_google_gemini_api_key_here
+GITA_GPT_MODEL=gemini-2.5-flash
 ```
 
 Strict Gemini mode:
@@ -50,6 +51,7 @@ Strict Gemini mode:
 ```text
 GITA_GPT_ENGINE=gemini
 GOOGLE_API_KEY=your_google_gemini_api_key_here
+GITA_GPT_MODEL=gemini-2.5-flash
 ```
 
 Use strict Gemini mode only when the key is valid and the host has outbound access to Google APIs.
@@ -69,6 +71,7 @@ Optional Gemini secrets:
 ```toml
 GITA_GPT_ENGINE = "auto"
 GOOGLE_API_KEY = "your_google_gemini_api_key_here"
+GITA_GPT_MODEL = "gemini-2.5-flash"
 ```
 
 The first run may take longer because the app reads and chunks `gita_book.pdf`.
@@ -90,7 +93,7 @@ docker run --rm -p 8501:8501 gita-gpt
 Run with Gemini:
 
 ```bash
-docker run --rm -p 8501:8501 -e GITA_GPT_ENGINE=auto -e GOOGLE_API_KEY=your_key_here gita-gpt
+docker run --rm -p 8501:8501 -e GITA_GPT_ENGINE=auto -e GOOGLE_API_KEY=your_key_here -e GITA_GPT_MODEL=gemini-2.5-flash gita-gpt
 ```
 
 Open:
@@ -107,7 +110,7 @@ Use these settings:
 - Start command: `streamlit run app.py`
 - Port: `8501`
 - Required environment variables: none for local mode
-- Optional environment variables: `GITA_GPT_ENGINE=auto`, `GOOGLE_API_KEY=...`
+- Optional environment variables: `GITA_GPT_ENGINE=auto`, `GOOGLE_API_KEY=...`, `GITA_GPT_MODEL=gemini-2.5-flash`
 
 ## Render or Railway
 
