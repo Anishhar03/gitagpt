@@ -1,17 +1,22 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app/backend
 
-WORKDIR /app
+WORKDIR /app/backend
 
-COPY requirements.txt .
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && python -m pip install --no-cache-dir -r requirements.txt
+RUN addgroup --system app && adduser --system --ingroup app app
 
-COPY . .
+COPY backend/requirements.txt /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt
 
-EXPOSE 8501
+COPY --chown=app:app backend /app/backend
+COPY --chown=app:app gita_book.pdf krishna_ji.jpeg /app/
+RUN mkdir -p /data/uploads && chown -R app:app /data/uploads
 
-CMD ["streamlit", "run", "app.py"]
+USER app
+EXPOSE 8000
+
+CMD ["sh", "entrypoint.sh", "api"]

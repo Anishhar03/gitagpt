@@ -1,160 +1,88 @@
-# Deployment Guide
+# Deployment
 
-This project is deployment-ready for Streamlit Community Cloud, Docker, and any platform that can run a Python web process.
-
-## Local Deployment
+## Local Compose
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
 cp .env.example .env
+docker compose up -d --build
+docker compose ps
+python scripts/smoke_test.py
 ```
 
-Edit `.env`:
+The stack exposes the web app on port `3000`, the API on `8000`, PostgreSQL on `5432`, and Redis on `6379`. The API runs Alembic before starting. Its lifespan queues the bundled PDF once by checksum, and the worker performs indexing.
 
-```bash
-GOOGLE_API_KEY=your_google_gemini_api_key_here
-```
+Use `docker compose logs -f api worker` to watch startup and ingestion. Use `docker compose down -v` only when local database, queue, and uploads can be discarded.
 
-Run:
+## Production Shape
 
-```bash
-streamlit run app.py
-```
-
-Open:
+Build the root `Dockerfile` twice with different commands for API and worker. Build `frontend/Dockerfile` for the web image. Deploy PostgreSQL with the `vector` extension and Redis as managed stateful services where possible.
 
 ```text
-http://localhost:8501
+Internet -> TLS/load balancer -> web CDN or Nginx
+                             -> API replicas
+API replicas -> PostgreSQL, Redis, Gemini/Groq
+Worker replicas -> Redis, PostgreSQL, PDF storage
 ```
 
-## Windows PowerShell
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
-Copy-Item .env.example .env
-streamlit run app.py
-```
-
-Set the key for the current terminal without writing a file:
-
-```powershell
-$env:GOOGLE_API_KEY = "your_google_gemini_api_key_here"
-streamlit run app.py
-```
-
-## Streamlit Community Cloud
-
-1. Push the repository to GitHub.
-2. Go to Streamlit Community Cloud.
-3. Click **New app**.
-4. Choose this repository.
-5. Select branch `main`.
-6. Set main file path to `app.py`.
-7. Open **Advanced settings**.
-8. Add this secret:
-
-```toml
-GOOGLE_API_KEY = "your_google_gemini_api_key_here"
-```
-
-9. Deploy.
-
-The first run may take longer because Chroma creates the vector index from `gita_book.pdf`.
-
-## Docker
-
-Build:
+Run exactly one migration job for each release:
 
 ```bash
-docker build -t gita-gpt .
+cd /app/backend
+alembic -c alembic.ini upgrade head
 ```
 
-Run:
+Do not run migrations concurrently from every API replica in a larger deployment. The Compose entry point is convenient for one deployment unit; an orchestrator should use a dedicated pre-deploy migration task.
+
+## Required Production Settings
+
+```dotenv
+ENVIRONMENT=production
+AUTH_MODE=google
+JWT_SECRET=<at-least-32-random-bytes>
+GOOGLE_CLIENT_ID=<oauth-web-client-id>
+ADMIN_EMAILS=owner@example.com
+DATABASE_URL=postgresql+psycopg://...
+REDIS_URL=rediss://...
+CORS_ORIGINS=https://gita.example.com
+```
+
+Set `GOOGLE_API_KEY`, `GROQ_API_KEY`, or both for hosted generation. Local fallback remains available, but production teams should decide whether that degraded behavior is preferable to returning an availability error.
+
+`VITE_API_ORIGIN` is embedded during the frontend build:
 
 ```bash
-docker run --rm -p 8501:8501 -e GOOGLE_API_KEY=your_google_gemini_api_key_here gita-gpt
+docker build --build-arg VITE_API_ORIGIN=https://api.gita.example.com -t gita-gpt-web ./frontend
 ```
 
-Open:
+## Storage
 
-```text
-http://localhost:8501
-```
+The included implementation stores PDFs on a shared `/data/uploads` volume. This is correct for Compose and one-node deployments. Before running workers across multiple nodes, replace `services/storage.py` with object storage or mount a shared durable filesystem. Database backups do not contain the original PDF bytes.
 
-## Generic Container Host
+## Health Checks
 
-Use these settings:
+- `/health/live` verifies that the API process can serve requests.
+- `/health/ready` verifies PostgreSQL and Redis connectivity.
+- The web container serves `/` through Nginx.
 
-- Build command: `pip install -r requirements.txt`
-- Start command: `streamlit run app.py`
-- Port: `8501`
-- Required environment variable: `GOOGLE_API_KEY`
+Route traffic only to ready API instances. A worker does not expose HTTP; monitor RQ heartbeats and queue age instead.
 
-## Render or Railway
+## Release Verification
 
-Recommended start command:
+Every release should pass:
 
 ```bash
-streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+docker compose config --quiet
+docker compose up -d --build
+python scripts/smoke_test.py
 ```
 
-Set environment variable:
+The GitHub Actions workflow performs backend lint and coverage, frontend lint/test/build, then this container smoke test. A green unit test job alone does not prove PostgreSQL vector migration, Redis queueing, PDF ingestion, or browser bundle delivery.
 
-```text
-GOOGLE_API_KEY=your_google_gemini_api_key_here
-```
+## Rollback
 
-If the platform does not expose `PORT`, use `8501`.
+1. Stop routing traffic to the new API image.
+2. Restore the prior API, worker, and web image tags together.
+3. Do not downgrade the database automatically. Review the migration's backward compatibility first.
+4. Inspect failed jobs before requeueing; ingestion is checksum-idempotent but external model calls may not be.
 
-## Secrets Checklist
-
-- Do not commit `.env`.
-- Do not commit `.streamlit/secrets.toml`.
-- Restrict the Google API key in Google Cloud Console.
-- Rotate the key if it is pasted into chat, logs, screenshots, or commits.
-
-## Troubleshooting
-
-### Google API key missing
-
-Set `GOOGLE_API_KEY` in one of:
-
-- `.env`
-- shell environment
-- Streamlit Secrets
-- deployment platform environment variables
-
-### Chroma sqlite error
-
-Linux deployments install `pysqlite3-binary` from `requirements.txt`, and `app.py` swaps it in before Chroma imports sqlite.
-
-### Chroma cache load error
-
-`gita_chroma/` is generated runtime data. If the local cache was created by an incompatible Chroma version, the app automatically removes it and rebuilds it from `gita_book.pdf`.
-
-### First query is slow
-
-The vector store is created on first run. Later runs load `gita_chroma/`.
-
-### App cannot find PDF or image
-
-Keep these files in the repository root:
-
-- `gita_book.pdf`
-- `krishna_ji.jpeg`
-
-### Gemini quota or permission failure
-
-Check:
-
-- Generative Language API is enabled.
-- The API key is correct.
-- The key has not been restricted to a different referrer or service.
-- Billing/quota settings allow the request.
-- The deployment host allows outbound HTTPS access to Google APIs.
+Use expand-and-contract migrations for changes that span releases: add compatible schema, deploy code that understands both versions, backfill, then remove old schema in a later release.

@@ -22,6 +22,11 @@ env/
 gita_chroma/
 users.json
 *.log
+frontend/node_modules/
+frontend/dist/
+data/
+.coverage
+htmlcov/
 
 # OS/editor noise
 .DS_Store

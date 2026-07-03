@@ -1,209 +1,163 @@
-# Gita GPT
+# Gita GPT Platform
 
-Gita GPT is an end-to-end Streamlit application that answers reflective questions with Retrieval-Augmented Generation over the Bhagavad Gita. It retrieves relevant passages from `gita_book.pdf`, sends the grounded context to Gemini, and returns a calm, practical response with source passages and a downloadable chat transcript.
+[![CI](https://github.com/Anishhar03/gitagpt/actions/workflows/ci.yml/badge.svg)](https://github.com/Anishhar03/gitagpt/actions/workflows/ci.yml)
 
-![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
-![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B?logo=streamlit&logoColor=white)
-![LangChain](https://img.shields.io/badge/LangChain-RAG-1C3C3C)
-![Chroma](https://img.shields.io/badge/Chroma-Vector%20Store-5B21B6)
-![Gemini](https://img.shields.io/badge/Gemini-Google%20AI-4285F4?logo=google&logoColor=white)
+Gita GPT is a source-grounded Bhagavad Gita study platform built to grow from a local demo to a multi-user service. It combines a responsive React workspace, a versioned FastAPI API, PostgreSQL with pgvector, Redis-backed jobs and rate limits, and an AI provider chain with a deterministic no-key mode.
 
-## What It Does
+The bundled Gita PDF is indexed automatically. Every answer includes the passages used to create it, and the app still works without a paid AI key.
 
-- Collects seeker context: name, age, and intention.
-- Loads the Bhagavad Gita PDF and chunks it into searchable passages.
-- Embeds passages with Google Generative AI embeddings.
-- Stores and reuses the local Chroma vector index in `gita_chroma/`.
-- Retrieves the most relevant passages for each question.
-- Sends retrieved context to Gemini for a grounded answer.
-- Shows source passages used for the response.
-- Exports the conversation as a PDF transcript.
-- Runs locally, in Docker, on Streamlit Community Cloud, or on a container host.
+## Capabilities
+
+- Persistent users, conversations, messages, feedback, and bookmarks.
+- Hybrid retrieval using pgvector similarity plus lexical relevance.
+- Gemini as the primary generator, Groq as fallback, and deterministic local answers as the final fallback.
+- Background PDF ingestion with RQ workers and admin document upload.
+- Google OIDC-ready authentication and a development login for local use.
+- Daily wisdom, passage citations, source drawers, Markdown exports, and conversation archiving.
+- Responsive desktop and mobile UI with accessible loading, empty, error, and navigation states.
+- Health and readiness probes, Prometheus metrics, structured logs, request IDs, and Redis rate limits.
+- Alembic migrations, non-root containers, backend tests, frontend tests, and full container smoke testing in CI.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A["gita_book.pdf"] --> B["PyPDFLoader"]
-    B --> C["Recursive text splitter"]
-    C --> D["Google embeddings"]
-    D --> E["Chroma vector store"]
-    F["User question"] --> G["Similarity search"]
-    E --> G
-    G --> H["Prompt with retrieved passages"]
-    H --> I["Gemini chat model"]
-    I --> J["Grounded answer + sources"]
-    J --> K["Streamlit UI"]
-    J --> L["PDF transcript"]
+    U["Browser"] --> W["React + Nginx"]
+    W --> A["FastAPI API"]
+    A --> P[("PostgreSQL + pgvector")]
+    A --> R[("Redis")]
+    R --> Q["RQ ingestion worker"]
+    Q --> P
+    A --> G["Gemini"]
+    A --> X["Groq fallback"]
+    A --> L["Local deterministic fallback"]
+    D["Bundled/admin PDFs"] --> Q
 ```
+
+The API is stateless and can be replicated. PostgreSQL owns durable state, Redis owns transient coordination, and workers scale independently from user traffic. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for request flows, failure behavior, and the path from 100 to 10,000 users.
 
 ## Quick Start
 
-### 1. Clone and enter the project
+Requirements: Docker Desktop with Compose v2.
 
 ```bash
 git clone https://github.com/Anishhar03/gitagpt.git
 cd gitagpt
+cp .env.example .env
+docker compose up --build
 ```
 
-### 2. Create a virtual environment
+Open [http://localhost:3000](http://localhost:3000). The default development account is created when you enter a display name. The bundled PDF is queued on first startup; the admin view shows its indexing status.
 
-Windows PowerShell:
+No AI key is required. To enable hosted models, set either or both values in `.env`:
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+```dotenv
+GOOGLE_API_KEY=your_key
+GROQ_API_KEY=your_key
 ```
 
-Linux/macOS:
+The provider order is Gemini, Groq, then local. A provider failure is contained to the current request and automatically advances to the next provider.
+
+Stop and remove local data with:
+
+```bash
+docker compose down -v
+```
+
+## Local Development
+
+Start PostgreSQL and Redis:
+
+```bash
+docker compose up -d postgres redis
+```
+
+Run the API and worker in separate terminals:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+python -m pip install -r backend/requirements-dev.txt
+cd backend
+alembic upgrade head
+uvicorn app.main:app --reload
 ```
-
-### 3. Install dependencies
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
+cd backend
+rq worker ingestion --url redis://localhost:6379/0
 ```
 
-### 4. Configure secrets
-
-Copy the example file:
+Run the frontend:
 
 ```bash
-cp .env.example .env
+cd frontend
+npm ci
+npm run dev
 ```
 
-Set your Google API key:
+On Windows, activate the environment with `.\.venv\Scripts\Activate.ps1`. For host-based backend development, change `DATABASE_URL` and `REDIS_URL` in `.env` from the Compose service names to `localhost`.
+
+## Verification
 
 ```bash
-GOOGLE_API_KEY=your_google_gemini_api_key_here
+cd backend
+ruff check app tests
+pytest --cov=app --cov-fail-under=70
+
+cd ../frontend
+npm run lint
+npm test
+npm run build
+
+cd ..
+python scripts/verify_project.py
+python scripts/smoke_test.py
 ```
 
-Never commit `.env`.
+`smoke_test.py` expects the Compose stack to be running. It validates readiness, the web app, authentication, document ingestion, retrieval, local generation, citations, feedback, bookmarks, daily wisdom, and export.
 
-### 5. Run the app
+## Configuration
 
-```bash
-streamlit run app.py
-```
+| Variable | Default | Purpose |
+|---|---|---|
+| `AUTH_MODE` | `development` | Use `google` in production. |
+| `JWT_SECRET` | local value | Signing key; replace in every deployed environment. |
+| `ADMIN_EMAILS` | `admin@gitagpt.local` | Comma-separated upload administrators. |
+| `GOOGLE_CLIENT_ID` | blank | Google Identity Services client ID. |
+| `GOOGLE_API_KEY` | blank | Gemini generation and embedding key. |
+| `GROQ_API_KEY` | blank | Groq generation fallback key. |
+| `RATE_LIMIT_PER_MINUTE` | `20` | Per-user chat limit. |
+| `RETRIEVAL_TOP_K` | `6` | Source passages returned per question. |
 
-Open:
+All settings are documented in [`.env.example`](.env.example) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+## Repository Map
 
 ```text
-http://localhost:8501
+backend/                 FastAPI, SQLAlchemy, RQ, migrations, tests
+frontend/                React, Vite, responsive UI, component tests
+docs/                    Architecture, API, deployment, operations, security
+scripts/smoke_test.py    Running-stack contract test
+scripts/verify_project.py Static structure, syntax, and secret check
+docker-compose.yml       Local production-shaped stack
+app.py                   Original Streamlit proof of concept (legacy)
 ```
 
-## Environment Variables
-
-| Variable | Required | Default | Meaning |
-|---|---:|---|---|
-| `GOOGLE_API_KEY` | Yes | none | Google Generative Language API key used by Gemini and embeddings. |
-| `GITA_GPT_MODEL` | No | `gemini-1.5-flash` | Chat model used for answer generation. |
-| `GITA_GPT_EMBEDDING_MODEL` | No | `models/embedding-001` | Embedding model used for vector retrieval. |
-| `GITA_GPT_CHUNK_SIZE` | No | `1000` | Character target for each PDF chunk. |
-| `GITA_GPT_CHUNK_OVERLAP` | No | `150` | Character overlap between chunks to preserve context. |
-| `GITA_GPT_TOP_K` | No | `4` | Number of retrieved passages sent to Gemini. |
-
-## Deployment
-
-### Streamlit Community Cloud
-
-1. Push this repo to GitHub.
-2. Open Streamlit Community Cloud.
-3. Create a new app from the GitHub repo.
-4. Main file: `app.py`.
-5. Add `GOOGLE_API_KEY` in Streamlit Secrets.
-6. Deploy.
-
-### Docker
-
-```bash
-docker build -t gita-gpt .
-docker run --rm -p 8501:8501 -e GOOGLE_API_KEY=your_key_here gita-gpt
-```
-
-Then open:
-
-```text
-http://localhost:8501
-```
-
-Full deployment notes are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+The original Streamlit proof of concept remains in `app.py` for comparison. Its dependencies are isolated in `requirements-legacy.txt`; it is not part of the production platform or CI path.
 
 ## Documentation
 
-- [docs/WORKFLOWS.md](docs/WORKFLOWS.md): user, RAG, transcript, and deployment workflows.
-- [docs/CODE_WALKTHROUGH.md](docs/CODE_WALKTHROUGH.md): meaning of each major block in `app.py`.
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): local, Streamlit Cloud, Docker, and troubleshooting guide.
+- [Architecture](docs/ARCHITECTURE.md)
+- [API contract](docs/API.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [Operations](docs/OPERATIONS.md)
+- [Security](docs/SECURITY.md)
+- [Workflows](docs/WORKFLOWS.md)
+- [Code walkthrough](docs/CODE_WALKTHROUGH.md)
 
-## Project Structure
+## Security
 
-```text
-.
-|-- app.py
-|-- gita_book.pdf
-|-- krishna_ji.jpeg
-|-- requirements.txt
-|-- .env.example
-|-- .streamlit/config.toml
-|-- Dockerfile
-|-- runtime.txt
-|-- docs/
-|   |-- CODE_WALKTHROUGH.md
-|   |-- DEPLOYMENT.md
-|   `-- WORKFLOWS.md
-`-- scripts/
-    `-- verify_project.py
-```
+Never commit `.env`, API keys, OAuth secrets, or production signing keys. Rotate any credential that has been pasted into chat, a terminal transcript, or a public issue. The repository verifier scans common GitHub, Groq, and Google key formats before publishing.
 
-## Validation
-
-Run the lightweight repository check:
-
-```bash
-python scripts/verify_project.py
-```
-
-Run the app:
-
-```bash
-streamlit run app.py
-```
-
-Expected behavior:
-
-1. The landing page and profile form load.
-2. You enter name, age, and intention.
-3. The chat opens and prepares the Gita knowledge base.
-4. A question retrieves Gita passages.
-5. Gemini returns a grounded answer.
-6. Retrieved sources are visible.
-7. Transcript PDF download works after messages exist.
-
-## Security Notes
-
-- Do not commit `.env` or real API keys.
-- The vector cache `gita_chroma/` is generated runtime data and is ignored by Git.
-- If a Google key is exposed publicly, revoke it or restrict it immediately in Google Cloud Console.
-- For public deployments, restrict the API key to the Generative Language API and trusted referrers or infrastructure where possible.
-
-## Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| `GOOGLE_API_KEY` missing | Set it in `.env`, shell env, or Streamlit Secrets. |
-| Chroma sqlite error | On Linux, `pysqlite3-binary` is installed and shimmed automatically. |
-| Chroma cache error | The generated `gita_chroma/` cache is rebuilt automatically when it is incompatible. |
-| Google connection error | Check API key restrictions, quota, Generative Language API access, and outbound network access. |
-| PDF not found | Keep `gita_book.pdf` in the project root. |
-| Background missing | Keep `krishna_ji.jpeg` in the project root. |
-| Gemini quota error | Check Google API key, billing/quota, and Generative Language API access. |
-| Slow first answer | The first run may create the vector store; later runs reuse `gita_chroma/`. |
-
-## License
-
-No license has been selected yet. Add one before accepting external contributions.
+No license is currently included. Add one before accepting external contributions.
