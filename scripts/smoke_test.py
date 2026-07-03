@@ -27,7 +27,7 @@ def wait_for(url, timeout=240):
     last_error = None
     while time.time() < deadline:
         try:
-            request(url)
+            request(url, expect_json=False)
             return
         except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
             last_error = exc
