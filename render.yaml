@@ -1,0 +1,68 @@
+services:
+  - type: keyvalue
+    name: gitagpt-cache-anishhar03
+    plan: free
+    region: singapore
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
+
+  - type: web
+    name: gitagpt-api-anishhar03
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: sh entrypoint.sh api
+    healthCheckPath: /health/ready
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gitagpt-db-anishhar03
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: gitagpt-cache-anishhar03
+          type: keyvalue
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: AUTH_MODE
+        value: development
+      - key: ADMIN_EMAILS
+        value: disabled-admin@gitagpt.invalid
+      - key: CORS_ORIGINS
+        value: https://gitagpt-web-anishhar03.onrender.com
+      - key: INGESTION_MODE
+        value: inline
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: SEED_DEFAULT_DOCUMENT
+        value: "true"
+
+  - type: web
+    name: gitagpt-web-anishhar03
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: VITE_API_ORIGIN
+        value: https://gitagpt-api-anishhar03.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+databases:
+  - name: gitagpt-db-anishhar03
+    databaseName: gitagpt
+    user: gitagpt
+    plan: free
+    region: singapore
+    postgresMajorVersion: "16"
+    ipAllowList: []

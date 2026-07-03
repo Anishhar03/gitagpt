@@ -7,6 +7,7 @@ from .config import settings
 from .database import SessionLocal
 from .models import Document
 from .redis_client import get_queue
+from .services.ingestion import ingest_document
 from .services.storage import checksum_file
 
 
@@ -37,5 +38,9 @@ def enqueue_default_document() -> None:
         db.add(document)
         db.commit()
         db.refresh(document)
-        get_queue().enqueue("app.tasks.ingest_document_job", str(document.id), job_timeout=900)
-        logger.info("default_document_enqueued", document_id=str(document.id))
+        if settings.ingestion_mode == "inline":
+            ingest_document(db, document.id)
+            logger.info("default_document_ingested_inline", document_id=str(document.id))
+        else:
+            get_queue().enqueue("app.tasks.ingest_document_job", str(document.id), job_timeout=900)
+            logger.info("default_document_enqueued", document_id=str(document.id))

@@ -101,3 +101,7 @@ Toward 10,000 users, autoscale API and workers independently, place the web bund
 - Add model providers by implementing `generate(prompt)` and registering them in `ProviderChain`.
 - Replace filesystem storage with S3-compatible storage behind `services/storage.py`.
 - Move answer generation to asynchronous jobs only if observed model latency requires it.
+
+## Free Render Profile
+
+The Render demonstration profile changes only the ingestion execution mode. With `INGESTION_MODE=inline`, PDF extraction and indexing run in the API process because free background workers are unavailable. PostgreSQL remains the durable source of chunks and vectors, while Redis-compatible Key Value still provides cache and rate-limit coordination. Compose and production deployments retain `INGESTION_MODE=queue` and the independent RQ worker.

@@ -1,6 +1,8 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,10 +38,20 @@ class Settings(BaseSettings):
     default_pdf_path: Path = Path("/app/gita_book.pdf")
     background_image_path: Path = Path("/app/krishna_ji.jpeg")
     seed_default_document: bool = True
+    ingestion_mode: Literal["queue", "inline"] = "queue"
     max_upload_bytes: int = 20 * 1024 * 1024
 
     service_name: str = "gita-gpt-api"
     log_level: str = "INFO"
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def select_psycopg_driver(cls, value: str) -> str:
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+psycopg://", 1)
+        if value.startswith("postgres://"):
+            return value.replace("postgres://", "postgresql+psycopg://", 1)
+        return value
 
     @property
     def allowed_origins(self) -> list[str]:

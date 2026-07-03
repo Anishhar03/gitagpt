@@ -12,6 +12,7 @@ from ..models import Bookmark, Chunk, Document, User
 from ..redis_client import get_queue, get_redis
 from ..schemas import BookmarkCreate, BookmarkOut, DailyWisdomOut, DocumentOut, SourceOut
 from ..security import get_current_user, require_admin
+from ..services.ingestion import ingest_document
 from ..services.storage import persist_upload
 
 
@@ -70,7 +71,10 @@ def upload_document(
     db.add(document)
     db.commit()
     db.refresh(document)
-    get_queue().enqueue("app.tasks.ingest_document_job", str(document.id), job_timeout=900)
+    if settings.ingestion_mode == "inline":
+        ingest_document(db, document.id)
+    else:
+        get_queue().enqueue("app.tasks.ingest_document_job", str(document.id), job_timeout=900)
     return document
 
 

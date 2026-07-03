@@ -86,3 +86,25 @@ The GitHub Actions workflow performs backend lint and coverage, frontend lint/te
 4. Inspect failed jobs before requeueing; ingestion is checksum-idempotent but external model calls may not be.
 
 Use expand-and-contract migrations for changes that span releases: add compatible schema, deploy code that understands both versions, backfill, then remove old schema in a later release.
+
+## Render Demonstration Stack
+
+The root `render.yaml` provides a no-cost demonstration profile:
+
+- Static React site on Render's CDN.
+- Docker-based FastAPI web service.
+- Free Render Postgres with pgvector enabled by Alembic.
+- Free Render Key Value for rate limits and daily caching.
+- Inline PDF ingestion inside the API process.
+
+Deploy it from the repository:
+
+```text
+https://render.com/deploy?repo=https://github.com/Anishhar03/gitagpt
+```
+
+The demo sets `ADMIN_EMAILS` to a non-user address, so public visitors cannot upload or delete documents. Browser installations receive stable anonymous IDs to prevent users from sharing one conversation account.
+
+Inline ingestion is a hosting compatibility mode, not the preferred scaling architecture. Use `INGESTION_MODE=queue` and deploy `sh entrypoint.sh worker` as a background worker for a paid or production Render environment. Move uploads to object storage before scaling the API and worker independently.
+
+Free Render Postgres instances expire after 30 days and free compute can spin down. Upgrade the database and API plans before relying on the URL for durable or latency-sensitive use.

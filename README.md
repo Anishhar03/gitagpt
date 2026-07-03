@@ -1,6 +1,7 @@
 # Gita GPT Platform
 
 [![CI](https://github.com/Anishhar03/gitagpt/actions/workflows/ci.yml/badge.svg)](https://github.com/Anishhar03/gitagpt/actions/workflows/ci.yml)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Anishhar03/gitagpt)
 
 Gita GPT is a source-grounded Bhagavad Gita study platform built to grow from a local demo to a multi-user service. It combines a responsive React workspace, a versioned FastAPI API, PostgreSQL with pgvector, Redis-backed jobs and rate limits, and an AI provider chain with a deterministic no-key mode.
 
@@ -63,6 +64,12 @@ Stop and remove local data with:
 ```bash
 docker compose down -v
 ```
+
+## Deploy on Render
+
+`render.yaml` defines a free demonstration stack with a static web app, Docker API, Render Postgres, and Render Key Value in Singapore. It uses `INGESTION_MODE=inline` because free background-worker instances are unavailable. The normal Compose deployment continues to use the separate RQ worker.
+
+Click the **Deploy to Render** button above or follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The public demo disables document administration and uses isolated anonymous visitor identities. Render's free PostgreSQL database expires after 30 days; choose a paid database before treating the deployment as durable.
 
 ## Local Development
 
@@ -129,6 +136,7 @@ python scripts/smoke_test.py
 | `GROQ_API_KEY` | blank | Groq generation fallback key. |
 | `RATE_LIMIT_PER_MINUTE` | `20` | Per-user chat limit. |
 | `RETRIEVAL_TOP_K` | `6` | Source passages returned per question. |
+| `INGESTION_MODE` | `queue` | Use `inline` only where a separate worker is unavailable. |
 
 All settings are documented in [`.env.example`](.env.example) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 

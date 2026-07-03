@@ -17,6 +17,7 @@ x-backend-environment: &backend-environment
   CHUNK_SIZE: ${CHUNK_SIZE:-1200}
   CHUNK_OVERLAP: ${CHUNK_OVERLAP:-180}
   MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-20971520}
+  INGESTION_MODE: ${INGESTION_MODE:-queue}
   UPLOAD_DIR: /data/uploads
   DEFAULT_PDF_PATH: /app/gita_book.pdf
   BACKGROUND_IMAGE_PATH: /app/krishna_ji.jpeg

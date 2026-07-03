@@ -10,6 +10,17 @@ import { MobileMenuButton, Sidebar } from './Sidebar';
 
 
 const TOKEN_KEY = 'gitagpt_access_token';
+const VISITOR_KEY = 'gitagpt_visitor_id';
+
+
+function visitorEmail() {
+  let visitorId = localStorage.getItem(VISITOR_KEY);
+  if (!visitorId) {
+    visitorId = crypto.randomUUID();
+    localStorage.setItem(VISITOR_KEY, visitorId);
+  }
+  return `${visitorId}@demo.gitagpt.local`;
+}
 
 
 function Workspace({ token, user, onLogout, imageUrl }) {
@@ -174,7 +185,7 @@ export function App() {
     setLoginError('');
   }, []);
   const devLogin = useMutation({
-    mutationFn: (name) => api.devLogin({ email: 'admin@gitagpt.local', display_name: name }),
+    mutationFn: (name) => api.devLogin({ email: visitorEmail(), display_name: name }),
     onSuccess: acceptLogin,
     onError: (error) => setLoginError(error.message),
   });

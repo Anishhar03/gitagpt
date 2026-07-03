@@ -1,8 +1,14 @@
 import math
 
+from app.config import Settings
 from app.services.embeddings import deterministic_embedding
 from app.services.ingestion import split_text
 from app.services.providers import LocalProvider, build_grounded_prompt
+
+
+def test_render_postgres_url_selects_psycopg_driver():
+    configured = Settings(database_url="postgresql://user:pass@internal/db")
+    assert configured.database_url == "postgresql+psycopg://user:pass@internal/db"
 
 
 def test_deterministic_embedding_is_stable_and_normalized():

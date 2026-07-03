@@ -10,6 +10,7 @@
 - Added structured logs, request IDs, readiness, Prometheus metrics, and non-root containers.
 - Added backend coverage, frontend quality gates, secret verification, and a full Compose smoke test in GitHub Actions.
 - Preserved the original Streamlit application as a legacy reference with isolated dependencies.
+- Added a validated free-tier Render profile with inline ingestion, isolated demo identities, and restricted public administration.
 
 ## 2026-05-27
 

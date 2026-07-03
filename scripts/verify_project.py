@@ -18,6 +18,7 @@ REQUIRED_FILES = [
     "frontend/package-lock.json",
     ".github/workflows/ci.yml",
     "docker-compose.yml",
+    "render.yaml",
     "requirements.txt",
     ".env.example",
     "gita_book.pdf",
@@ -61,6 +62,7 @@ SECRET_PATTERNS = [
     re.compile(r"ghp_[0-9A-Za-z_]+"),
     re.compile(r"github_pat_[0-9A-Za-z_]+"),
     re.compile(r"gsk_[0-9A-Za-z_]+"),
+    re.compile(r"rnd_[0-9A-Za-z_]+"),
 ]
 
 
